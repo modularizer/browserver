@@ -12,11 +12,16 @@
   },
   "dependencies": {
     "@browserver/core": "0.0.0",
+    "@browserver/database": "0.0.0",
     "@browserver/runtime": "0.0.0",
     "@browserver/storage": "0.0.0",
-    "@modularizer/plat": "^0.2.0",
+    "@modularizer/plat-client": "file:../../../plat/typescript_client",
+    "fflate": "^0.8.2",
+    "jszip": "^3.10.1",
     "monaco-editor": "^0.55.1",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "xlsx": "^0.18.5",
+    "zustand": "^5.0.12"
   }
 }

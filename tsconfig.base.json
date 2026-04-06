@@ -12,6 +12,7 @@
     "baseUrl": ".",
     "paths": {
       "@browserver/core": ["packages/core/src/index.ts"],
+      "@browserver/database": ["packages/database/src/index.ts"],
       "@browserver/runtime": ["packages/runtime/src/index.ts"],
       "@browserver/storage": ["packages/storage/src/index.ts"]
     }

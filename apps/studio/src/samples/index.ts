@@ -1,7 +1,24 @@
+export type StudioFileLanguage =
+  | 'typescript'
+  | 'python'
+  | 'javascript'
+  | 'json'
+  | 'html'
+  | 'css'
+  | 'markdown'
+  | 'yaml'
+  | 'image'
+  | 'video'
+  | 'pdf'
+  | 'csv'
+  | 'xlsx'
+  | 'archive'
+  | 'plaintext'
+
 export interface SampleFile {
   name: string
   content: string
-  language: 'typescript' | 'python'
+  language: StudioFileLanguage
 }
 
 export interface Sample {
@@ -18,6 +35,7 @@ import tsMathServer from './ts-math/server.ts?raw'
 import tsMathClient from './ts-math/client.ts?raw'
 import pyHelloServer from './py-hello/server.py?raw'
 import pyHelloClient from './py-hello/client.ts?raw'
+import pyHelloNotebook from './py-hello/notebook.ipynb?raw'
 
 export const samples: Sample[] = [
   {
@@ -48,6 +66,7 @@ export const samples: Sample[] = [
     files: [
       { name: 'server.py', content: pyHelloServer, language: 'python' },
       { name: 'client.ts', content: pyHelloClient, language: 'typescript' },
+      { name: 'notebook.ipynb', content: pyHelloNotebook, language: 'json' },
     ],
   },
 ]

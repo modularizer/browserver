@@ -2,8 +2,63 @@
 @tailwind components;
 @tailwind utilities;
 
+:root {
+  --bs-bg: #0f1117;
+  --bs-bg-panel: #161822;
+  --bs-bg-sidebar: #12141c;
+  --bs-bg-editor: #1a1d2e;
+  --bs-bg-input: #1e2130;
+  --bs-bg-hover: #1f2335;
+  --bs-bg-active: #252940;
+  --bs-bg-badge: #2a2f4a;
+  --bs-border: #2a2e42;
+  --bs-border-focus: #5c6bc0;
+  --bs-text: #c8ccd8;
+  --bs-text-muted: #7c829d;
+  --bs-text-faint: #4a4f6a;
+  --bs-text-inverse: #0f1117;
+  --bs-accent: #7c8cf0;
+  --bs-accent-hover: #9aa5f4;
+  --bs-accent-text: #ffffff;
+  --bs-good: #66bb6a;
+  --bs-warn: #ffa726;
+  --bs-error: #ef5350;
+  --bs-info: #42a5f5;
+  --bs-call-active: #7c8cf0;
+  --bs-log-stream: #80cbc4;
+  --bs-peer-online: #66bb6a;
+  --bs-peer-offline: #616680;
+  --bs-tab-active: #1a1d2e;
+  --bs-tab-inactive: #12141c;
+  --bs-tab-hover: #1f2335;
+}
+
 html, body, #root {
   height: 100%;
   margin: 0;
   overflow: hidden;
+  background: var(--bs-bg);
+  color: var(--bs-text);
+}
+
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+body {
+  font-family: ui-sans-serif, system-ui, sans-serif;
+}
+
+.bs-runtime-line {
+  background: color-mix(in srgb, var(--bs-call-active) 16%, transparent);
+}
+
+.bs-runtime-glyph {
+  border-left: 3px solid var(--bs-call-active);
+  margin-left: 2px;
 }

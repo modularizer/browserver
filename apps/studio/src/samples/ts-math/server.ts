@@ -1,4 +1,4 @@
-import { serveClientSideServer } from '@modularizer/plat/client-server'
+import { serveClientSideServer } from '@modularizer/plat-client/client-server'
 
 class MathApi {
   /** Add two numbers and return the sum. */

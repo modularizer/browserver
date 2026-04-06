@@ -1,13 +1,18 @@
+import fs from 'node:fs/promises'
 import path from 'node:path'
 import react from '@vitejs/plugin-react'
 import { defineConfig } from 'vite'
 import { viteSingleFile } from 'vite-plugin-singlefile'
 
 export default defineConfig(({ mode }) => ({
-  plugins: [react(), ...(mode === 'singlefile' ? [viteSingleFile()] : [])],
+  plugins: [
+    react(),
+    ...(mode === 'singlefile' ? [viteSingleFile(), inlineMonacoWorkerFiles()] : []),
+  ],
   resolve: {
     alias: {
       '@browserver/core': path.resolve(__dirname, '../../packages/core/src/index.ts'),
+      '@browserver/database': path.resolve(__dirname, '../../packages/database/src/index.ts'),
       '@browserver/runtime': path.resolve(__dirname, '../../packages/runtime/src/index.ts'),
       '@browserver/storage': path.resolve(__dirname, '../../packages/storage/src/index.ts'),
     },
@@ -29,7 +34,7 @@ export default defineConfig(({ mode }) => ({
                 return 'monaco'
               }
               if (
-                id.includes('node_modules/@modularizer/plat') ||
+                id.includes('node_modules/@modularizer/plat-client') ||
                 id.includes('node_modules/mqtt') ||
                 id.includes('node_modules/zod')
               ) {
@@ -41,3 +46,27 @@ export default defineConfig(({ mode }) => ({
   },
   publicDir: 'public',
 }))
+
+function inlineMonacoWorkerFiles() {
+  return {
+    name: 'inline-monaco-worker-files',
+    apply: 'build' as const,
+    async closeBundle() {
+      const distDir = path.resolve(__dirname, 'dist')
+      const indexPath = path.join(distDir, 'index.html')
+      let html = await fs.readFile(indexPath, 'utf8')
+      const filenames = await fs.readdir(distDir)
+      const workerFiles = filenames.filter((name) => /\.worker-[A-Za-z0-9_-]+\.js$/.test(name))
+
+      for (const fileName of workerFiles) {
+        const workerPath = path.join(distDir, fileName)
+        const source = await fs.readFile(workerPath)
+        const dataUrl = `data:text/javascript;base64,${source.toString('base64')}`
+        html = html.replaceAll(fileName, dataUrl)
+        await fs.rm(workerPath)
+      }
+
+      await fs.writeFile(indexPath, html)
+    },
+  }
+}
