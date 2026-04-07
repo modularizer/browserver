@@ -1,6 +1,5 @@
 import { create } from 'zustand'
-import { connectClientSideServer } from '@modularizer/plat-client/client-server'
-import type { OpenAPIClient } from '@modularizer/plat-client/client-server'
+import { connectClientSideServer, OpenAPIClient } from '@modularizer/plat-client/client-server'
 import {
   startLocalTsRuntime,
 } from '../runtime/localTsRuntime'
@@ -119,8 +118,8 @@ const runtimeHandles: Partial<Record<EditorPaneId, LocalRuntimeHandle | null>> =
   tertiary: null,
 }
 
-/** Active plat CSS (MQTT/WebRTC) client for the playground target; not used for HTTP APIs. */
-let cssPlaygroundClient: { baseUrl: string; client: OpenAPIClient } | null = null
+/** Active plat OpenAPI client for the current playground target (css:// or http(s)://). */
+let playgroundClient: { baseUrl: string; client: OpenAPIClient } | null = null
 const pendingServerRequests: Partial<Record<EditorPaneId, Map<string, {
   operationId: string
   operationLabel?: string
@@ -195,6 +194,14 @@ function getDefaultClientTarget(state: RuntimeState): string {
 
 function formatTimelineStage(entry: RuntimeRequestTimelineEntry): string {
   return `[${entry.stage}] ${entry.title}`
+}
+
+function normalizePlaygroundTarget(url: string): string {
+  const trimmed = url.trim()
+  if (trimmed.startsWith('css://')) {
+    return normalizeCssTargetUrl(trimmed)
+  }
+  return normalizeClientApiBaseUrl(trimmed)
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -511,7 +518,7 @@ export const useRuntimeStore = create<RuntimeState>()((set, get) => ({
               serverName: `${workspace.sample.id}-${pane}`,
             })
         runtimeHandles[pane] = handle
-        cssPlaygroundClient = null
+        playgroundClient = null
 
         updatePaneSession(set, get, pane, {
           mode: 'server',
@@ -700,7 +707,6 @@ export const useRuntimeStore = create<RuntimeState>()((set, get) => ({
       await runtimeHandles[pane]?.stop()
       runtimeHandles[pane] = null
     }
-        pendingServerRequests[pane]?.clear()
     pendingServerRequests[pane]?.clear()
 
     updatePaneSession(set, get, pane, createEmptyPaneSession())
@@ -760,114 +766,30 @@ export const useRuntimeStore = create<RuntimeState>()((set, get) => ({
         throw new Error('Invocation input must be a JSON object')
       }
       input = parsed as Record<string, unknown>
-    } catch (error) {
-      set({
-        logs: [
-          logEntry('error', `Invalid JSON for ${operationId}`, error instanceof Error ? error.message : error),
-          ...get().logs,
-        ],
-      })
-      return
+    } catch {
+      throw new Error('Invocation input must be a JSON object')
     }
 
-    const startedAt = Date.now()
     const targetUrl = get().clientTargetUrl || get().connectionUrl
 
     if (!targetUrl) {
-      set({ logs: [logEntry('error', 'No target URL for invocation'), ...get().logs] })
-      return
+      throw new Error('No target URL for invocation')
     }
-
-    set({
-      activeRequestId: null,
-      logs: [
-        logEntry('info', `Invoking ${operation.label} at ${targetUrl}`, input),
-        ...get().logs,
-      ],
-    })
     try {
       const trimmedTarget = targetUrl.trim()
 
-      if (trimmedTarget.startsWith('css://')) {
-        if (
-          !cssPlaygroundClient
-          || normalizeCssTargetUrl(cssPlaygroundClient.baseUrl) !== normalizeCssTargetUrl(trimmedTarget)
-        ) {
-          await get().fetchOperations(trimmedTarget)
-        }
-        const cssClient = cssPlaygroundClient?.client
-        if (cssClient) {
-          await invokeOpenApiClientOperation(cssClient, operation, input)
-          return
-        }
+      const normalizedTarget = normalizePlaygroundTarget(trimmedTarget)
+      if (!playgroundClient || normalizePlaygroundTarget(playgroundClient.baseUrl) !== normalizedTarget) {
+        await get().fetchOperations(trimmedTarget)
       }
-
-      setHighlightedHandler(set, operation.id)
-
-      let base = normalizeClientApiBaseUrl(trimmedTarget)
-      if (base.startsWith('css://')) {
+      const client = playgroundClient?.client
+      if (!client) {
         throw new Error('No connection for this target — use Connect or start a local server')
       }
-
-      const url = new URL(operation.path, `${base}/`)
-      const response = await fetch(url.toString(), {
-        method: operation.method,
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(input),
-      })
-      const result = await response.json()
-      const endedAt = Date.now()
-      const entry: RuntimeRequestEntry = {
-        id: crypto.randomUUID(),
-        operationId,
-        operationLabel: operation.label,
-        method: operation.method,
-        path: operation.path,
-        input,
-        ok: response.ok,
-        result: response.ok ? result : undefined,
-        error: !response.ok ? { status: response.status, message: result.error || response.statusText } : undefined,
-        events: [],
-        startedAt,
-        endedAt,
-        durationMs: endedAt - startedAt,
-        timeline: [],
-      }
-      set({
-        activeRequestId: entry.id,
-        requests: [entry, ...get().requests].slice(0, 50),
-        logs: [
-          logEntry(entry.ok ? 'info' : 'error', `${entry.ok ? 'Completed' : 'Failed'} ${entry.operationLabel ?? entry.operationId}`, entry.ok ? entry.result : entry.error),
-          ...get().logs,
-        ].slice(0, 200),
-      })
+      await invokeOpenApiClientOperation(client, operation, input)
     } catch (error) {
-      const endedAt = Date.now()
       const errorMessage = error instanceof Error ? error.message : String(error)
-      const entry: RuntimeRequestEntry = {
-        id: crypto.randomUUID(),
-        operationId,
-        operationLabel: operation.label,
-        method: operation.method,
-        path: operation.path,
-        input,
-        ok: false,
-        result: undefined,
-        error: { message: errorMessage },
-        events: [],
-        startedAt,
-        endedAt,
-        durationMs: endedAt - startedAt,
-        timeline: [],
-      }
-      set({
-        activeRequestId: entry.id,
-        requests: [entry, ...get().requests].slice(0, 50),
-        logs: [
-          logEntry('error', `Invocation failed for ${operationId}`, errorMessage),
-          ...get().logs,
-        ],
-      })
+      throw new Error(errorMessage)
     }
   },
   runClientFile: async (filePath) => {
@@ -940,12 +862,12 @@ export const useRuntimeStore = create<RuntimeState>()((set, get) => ({
     if (!url) return
 
     const trimmed = url.trim()
-    cssPlaygroundClient = null
+    playgroundClient = null
 
     if (trimmed.startsWith('css://')) {
       try {
         const { client, openapi } = await connectClientSideServer({ baseUrl: trimmed })
-        cssPlaygroundClient = { baseUrl: normalizeCssTargetUrl(trimmed), client }
+        playgroundClient = { baseUrl: normalizeCssTargetUrl(trimmed), client }
         const spec = openapi as Record<string, any>
         const operations = extractOperationsFromOpenApi(spec)
         const invocationDrafts = Object.fromEntries(
@@ -964,7 +886,7 @@ export const useRuntimeStore = create<RuntimeState>()((set, get) => ({
       }
     }
 
-    let base = normalizeClientApiBaseUrl(trimmed)
+    const base = normalizeClientApiBaseUrl(trimmed)
 
     const openapiUrls = [`${base}/openapi.json`, `${base}/openapi.yaml`, `${base}/openapi`]
 
@@ -973,6 +895,7 @@ export const useRuntimeStore = create<RuntimeState>()((set, get) => ({
         const response = await fetch(openapiUrl)
         if (!response.ok) continue
         const openapi = await response.json()
+        playgroundClient = { baseUrl: base, client: new OpenAPIClient(openapi, { baseUrl: base }) }
         const operations = extractOperationsFromOpenApi(openapi)
         const invocationDrafts = Object.fromEntries(
           operations.map((operation) => [operation.id, get().invocationDrafts[operation.id] ?? '{}'] as const),
