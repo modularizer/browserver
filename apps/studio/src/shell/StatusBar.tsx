@@ -8,6 +8,7 @@ export function StatusBar() {
   const activeFile = useWorkspaceStore(selectActiveFile)
   const dirtyFilePaths = useWorkspaceStore((state) => state.dirtyFilePaths)
   const saveState = useWorkspaceStore((state) => state.saveState)
+  const saveError = useWorkspaceStore((state) => state.saveError)
   const activePanel = useWorkspaceStore((state) => state.activePanel)
   const runtimeLanguage = useRuntimeStore((state) => state.language)
   const runtimeStatus = useRuntimeStore((state) => state.status)
@@ -27,7 +28,9 @@ export function StatusBar() {
       <span className="opacity-70">{activeFile?.name ?? 'no file'}</span>
       <span className="opacity-70">{activeFile?.language ?? 'n/a'}</span>
       <span className="opacity-70">{dirtyFilePaths.length > 0 ? `${dirtyFilePaths.length} unsaved` : 'clean'}</span>
-      <span className="opacity-70">{saveState}</span>
+      <span className={`opacity-70 ${saveError ? 'text-white bg-bs-error px-1 font-bold' : ''}`}>
+        {saveError ? `Error: ${saveError}` : saveState}
+      </span>
       <span className="opacity-70">{runtimeLanguage ?? sample.serverLanguage}</span>
       <span className="opacity-70">{runtimeStatus}</span>
       <span className="opacity-70">{launchable ? 'launchable' : 'blocked'}</span>

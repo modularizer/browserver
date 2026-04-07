@@ -1,5 +1,5 @@
 import ts from 'typescript'
-import type { LocalRuntimeHandle } from './types'
+import { connectClientSideServer } from '@modularizer/plat-client/client-server'
 
 export interface ClientRunResult {
   result: unknown
@@ -9,8 +9,7 @@ export interface ClientRunResult {
 
 export async function runClientSource(options: {
   source: string
-  runtime: LocalRuntimeHandle
-  targetUrl?: string
+  targetUrl: string
 }): Promise<ClientRunResult> {
   const moduleSource = buildClientModuleSource(options.source)
   const compiled = ts.transpileModule(moduleSource, {
@@ -21,8 +20,12 @@ export async function runClientSource(options: {
   })
 
   const logs: string[] = []
-  const openapi = buildOpenApiStub(options.runtime)
-  const LocalOpenAPIClient = createLocalOpenApiClient(options.runtime, options.targetUrl)
+  
+  // Always get openapi by connecting to the target server (like real clients do)
+  const { openapi: fetchedOpenapi } = await connectClientSideServer({ baseUrl: options.targetUrl })
+  const openapi = fetchedOpenapi as unknown as Record<string, unknown>
+  
+  const LocalOpenAPIClient = createOpenApiClient(options.targetUrl)
   const module = { exports: {} as Record<string, unknown> }
 
   const require = (specifier: string) => {
@@ -89,52 +92,11 @@ ${bodyLines.join('\n')}
 `.trim()
 }
 
-function createLocalOpenApiClient(runtime: LocalRuntimeHandle, targetUrl?: string) {
-  return class LocalOpenAPIClient {
-    constructor(_openapi: unknown, _options: unknown) {
-      void targetUrl
-      return new Proxy(
-        {},
-        {
-          get(_target, property) {
-            if (typeof property !== 'string') {
-              return undefined
-            }
-
-            return async (input: Record<string, unknown> = {}) => {
-              const operation = runtime.operations.find((entry) => entry.id === property)
-              if (!operation) {
-                throw new Error(`No runtime operation named "${property}" is available`)
-              }
-
-              const result = await runtime.invoke(operation.id, input)
-              if (!result.ok) {
-                throw new Error(result.error?.message ?? `Client call failed for ${property}`)
-              }
-
-              return result.result
-            }
-          },
-        },
-      )
-    }
-  }
-}
-
-function buildOpenApiStub(runtime: LocalRuntimeHandle): Record<string, unknown> {
-  return {
-    openapi: '3.1.0',
-    paths: Object.fromEntries(
-      runtime.operations.map((operation) => [
-        operation.path,
-        {
-          [operation.method.toLowerCase()]: {
-            operationId: operation.id,
-            summary: operation.summary,
-          },
-        },
-      ]),
-    ),
+function createOpenApiClient(targetUrl: string) {
+  // Use real client connection for genuine communication
+  return async () => {
+    const { client } = await connectClientSideServer({ baseUrl: targetUrl })
+    return client
   }
 }
 

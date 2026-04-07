@@ -20,6 +20,10 @@
   "engines": {
     "node": ">=20.0.0"
   },
+  "dependencies": {
+    "isomorphic-git": "^1.25.7",
+    "@isomorphic-git/lightning-fs": "^4.6.2"
+  },
   "devDependencies": {
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",

@@ -1,5 +1,7 @@
 export interface RuntimeOperation {
   id: string
+  /** Display name without HTTP verb/path noise (e.g. `add` instead of `POST /add`). */
+  label: string
   method: string
   path: string
   summary?: string
@@ -51,11 +53,5 @@ export interface LocalRuntimeHandle {
   launchNote?: string
   serverName: string
   connectionUrl: string | null
-  openapi: Record<string, unknown>
-  diagnostics: RuntimeDiagnostic[]
-  compiledCode: string | null
-  analysisSummary: RuntimeAnalysisSummary[]
-  operations: RuntimeOperation[]
-  invoke: (operationId: string, input?: Record<string, unknown>) => Promise<RuntimeInvocationResult>
   stop: () => Promise<void>
 }

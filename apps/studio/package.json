@@ -15,13 +15,21 @@
     "@browserver/database": "0.0.0",
     "@browserver/runtime": "0.0.0",
     "@browserver/storage": "0.0.0",
+    "@isomorphic-git/lightning-fs": "^4.6.2",
     "@modularizer/plat-client": "file:../../../plat/typescript_client",
     "fflate": "^0.8.2",
+    "isomorphic-git": "^1.25.7",
     "jszip": "^3.10.1",
     "monaco-editor": "^0.55.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
+    "redoc": "^2.5.2",
+    "swagger-ui-react": "^5.21.0",
     "xlsx": "^0.18.5",
+    "yaml": "^2.8.3",
     "zustand": "^5.0.12"
+  },
+  "devDependencies": {
+    "@types/swagger-ui-react": "^5.18.0"
   }
 }

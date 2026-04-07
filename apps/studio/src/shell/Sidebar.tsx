@@ -102,6 +102,25 @@ export function Sidebar({
     }
   }, [contextMenu])
 
+  const workspaceId = useWorkspaceStore((s) => s.sample.id)
+  const setActiveBottomPanel = useWorkspaceStore((s) => s.setActiveBottomPanel)
+  const [commits, setCommits] = useState<Array<{ oid: string; message: string; author?: { name?: string; email?: string; timestamp?: number } }>>([])
+
+  useEffect(() => {
+    let cancelled = false
+    async function load() {
+      try {
+        const mod = await import('../store/git')
+        const list = await mod.log(workspaceId, 50)
+        if (!cancelled) setCommits(list)
+      } catch (err) {
+        console.warn('Failed to load commits', err)
+      }
+    }
+    void load()
+    return () => { cancelled = true }
+  }, [workspaceId])
+
   return (
     <div
       ref={rootRef}
@@ -289,10 +308,7 @@ export function Sidebar({
               setActiveFile(file.path, activeEditorPane)
               startRenaming(file.path)
             }}
-            onContextMenu={(x, y) => {
-              setActiveFile(file.path, activeEditorPane)
-              setContextMenu({ kind: 'file', path: file.path, x, y })
-            }}
+            onContextMenu={(x, y) => setContextMenu({ kind: 'file', path: file.path, x, y })}
             onDragStart={() => setDraggedEntry({ kind: 'file', path: file.path })}
             onDragEnd={() => {
               setDraggedEntry(null)
@@ -360,6 +376,43 @@ export function Sidebar({
           )}
         </div>
       ) : null}
+
+      {/* Version history (Git commits) */}
+      <div className="flex-none border-t border-bs-border bg-bs-bg-sidebar/60">
+        <div className="flex items-center justify-between px-3 py-1">
+          <div className="text-[10px] font-semibold uppercase tracking-wider text-bs-text-faint">History</div>
+          <button
+            className="inline-flex h-5 items-center justify-center rounded px-1 text-[10px] text-bs-text-faint hover:bg-bs-bg-active hover:text-bs-text"
+            title="Open History panel"
+            onClick={() => setActiveBottomPanel('history')}
+          >
+            Open
+          </button>
+        </div>
+        <div className="max-h-48 overflow-auto px-2 pb-2">
+          {commits.length === 0 ? (
+            <div className="px-2 py-1 text-[11px] text-bs-text-faint">- no commits yet -</div>
+          ) : (
+            commits.map((c) => {
+              const firstLine = (c.message || '').split('\n')[0] || '(no message)'
+              const short = c.oid.slice(0, 7)
+              const author = c.author?.name || 'browserver'
+              return (
+                <div key={c.oid} className="group/row cursor-pointer rounded px-2 py-1 text-[11px] text-bs-text-muted hover:bg-bs-bg-hover hover:text-bs-text"
+                  onClick={() => setActiveBottomPanel('history')}
+                  title={`${c.oid} — ${c.message}`}
+                >
+                  <div className="flex items-center gap-2">
+                    <span className="text-bs-accent font-mono">{short}</span>
+                    <span className="truncate">{firstLine}</span>
+                  </div>
+                  <div className="ml-6 text-[10px] text-bs-text-faint">{author}</div>
+                </div>
+              )
+            })
+          )}
+        </div>
+      </div>
     </div>
   )
 }
@@ -561,7 +614,7 @@ function FolderEntry({
                 onActivateFile(file.path)
                 onStartRename(file.path)
               }}
-              onContextMenu={(x, y) => onSetContextMenu({ path: file.path, x, y })}
+              onContextMenu={(x, y) => onSetContextMenu({ kind: 'file', path: file.path, x, y })}
               onDragStart={() => onDragEntryStart({ kind: 'file', path: file.path })}
               onDragEnd={onDragEntryEnd}
             />

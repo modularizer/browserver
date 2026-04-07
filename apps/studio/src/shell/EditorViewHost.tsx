@@ -1,3 +1,8 @@
+import { useEffect, useMemo, useRef, useState } from 'react'
+import * as monaco from 'monaco-editor'
+import SwaggerUI from 'swagger-ui-react'
+import 'swagger-ui-react/swagger-ui.css'
+import { RedocStandalone } from 'redoc'
 import type { DatabaseSnapshot } from '@browserver/database'
 import type { WorkspaceSnapshot } from '@browserver/storage'
 import type { ProjectBundle } from '../config/projectBundle'
@@ -7,13 +12,14 @@ import { TrustPanel } from './TrustPanel'
 import { useCheckpointStore } from '../store/checkpoints'
 import { useDatabaseStore } from '../store/database'
 import { layoutPresets, useLayoutStore } from '../store/layout'
-import { useRuntimeStore } from '../store/runtime'
+import { useRuntimeStore, type RuntimeRequestEntry } from '../store/runtime'
 import { useThemeStore } from '../theme'
 import {
   getEditorViewId,
   useWorkspaceStore,
 } from '../store/workspace'
 import { useTrustStore } from '../store/trust'
+import type { RuntimeOperation } from '../runtime/types'
 
 interface EditorViewHostProps {
   path: string
@@ -23,9 +29,7 @@ export function EditorViewHost({ path }: EditorViewHostProps) {
   const viewId = getEditorViewId(path)
 
   if (viewId === 'inspect') return <InspectView />
-  if (viewId === 'client') return <ClientView />
-  if (viewId === 'swagger') return <OpenApiView variant="swagger" />
-  if (viewId === 'redoc') return <OpenApiView variant="redoc" />
+  if (viewId === 'api' || viewId === 'client' || viewId === 'swagger' || viewId === 'redoc') return <ApiView />
   if (viewId === 'data') return <DataView />
   if (viewId === 'trust') return <TrustPanel />
   if (viewId === 'history') return <HistoryView />
@@ -127,7 +131,7 @@ function InspectView() {
                 <span className={activeRequest.ok ? 'text-bs-good' : 'text-bs-error'}>
                   {activeRequest.ok ? 'ok' : 'error'}
                 </span>
-                <span className="text-bs-text">{activeRequest.operationId}</span>
+                <span className="text-bs-text">{activeRequest.operationLabel ?? activeRequest.operationId}</span>
                 <span className="text-bs-text-faint">{activeRequest.durationMs}ms</span>
               </div>
               <div className="mt-2 text-bs-text-faint">input</div>
@@ -154,109 +158,501 @@ function InspectView() {
   )
 }
 
-function ClientView() {
-  const activeFilePath = useWorkspaceStore((state) => state.activeFilePath)
-  const files = useWorkspaceStore((state) => state.files)
-  const connectionUrl = useRuntimeStore((state) => state.connectionUrl)
-  const serverName = useRuntimeStore((state) => state.serverName)
+type ApiViewMode = 'client' | 'swagger' | 'redoc' | 'json' | 'yaml'
+
+function ApiView() {
+  const [mode, setMode] = useState<ApiViewMode>('client')
+  const clientTargetUrl = useRuntimeStore((state) => state.clientTargetUrl)
+  const openapiDocument = useRuntimeStore((state) => state.openapiDocument)
   const operations = useRuntimeStore((state) => state.operations)
   const invocationDrafts = useRuntimeStore((state) => state.invocationDrafts)
   const setInvocationDraft = useRuntimeStore((state) => state.setInvocationDraft)
   const invokeOperation = useRuntimeStore((state) => state.invokeOperation)
-  const clientRun = useRuntimeStore((state) => state.clientRun)
-  const runClientFile = useRuntimeStore((state) => state.runClientFile)
-  const selectedClientPath = files.find((file) => file.path === activeFilePath && file.name.startsWith('client'))?.path
-    ?? files.find((file) => file.name.startsWith('client'))?.path
-    ?? undefined
-  const targetPlaceholder = connectionUrl ?? (serverName ? `css://${serverName}` : 'css://hello')
+  const requests = useRuntimeStore((state) => state.requests)
+  const fetchOperations = useRuntimeStore((state) => state.fetchOperations)
+
+  const [isConnecting, setIsConnecting] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const connectGeneration = useRef(0)
+
+  const handleConnect = async () => {
+    if (!clientTargetUrl) return
+    // Skip if operations are already loaded (e.g. from runPane)
+    const currentOps = useRuntimeStore.getState().operations
+    if (currentOps.length > 0) return
+
+    const gen = ++connectGeneration.current
+    setIsConnecting(true)
+    setError(null)
+    try {
+      await fetchOperations(clientTargetUrl)
+      if (gen !== connectGeneration.current) return // stale
+      const ops = useRuntimeStore.getState().operations
+      if (ops.length === 0) {
+        setError('No operations found at target')
+      }
+    } catch (e) {
+      if (gen !== connectGeneration.current) return // stale
+      setError(e instanceof Error ? e.message : 'Connection failed')
+    } finally {
+      if (gen === connectGeneration.current) {
+        setIsConnecting(false)
+      }
+    }
+  }
+
+  const forceConnect = async () => {
+    if (!clientTargetUrl) return
+    const gen = ++connectGeneration.current
+    setIsConnecting(true)
+    setError(null)
+    try {
+      await fetchOperations(clientTargetUrl)
+      if (gen !== connectGeneration.current) return
+      const ops = useRuntimeStore.getState().operations
+      if (ops.length === 0) {
+        setError('No operations found at target')
+      }
+    } catch (e) {
+      if (gen !== connectGeneration.current) return
+      setError(e instanceof Error ? e.message : 'Connection failed')
+    } finally {
+      if (gen === connectGeneration.current) {
+        setIsConnecting(false)
+      }
+    }
+  }
+
+  useEffect(() => {
+    if (clientTargetUrl) {
+      void handleConnect()
+    }
+  }, [clientTargetUrl])
+
+  const specJson = openapiDocument ? JSON.stringify(openapiDocument) : null
+  const stableSpec = useMemo(
+    () => (specJson ? JSON.parse(specJson) : null),
+    [specJson],
+  )
 
   return (
-    <div className="flex h-full min-h-0 gap-3 p-3 text-[11px]">
-      <div className="flex w-[320px] flex-none flex-col gap-2 overflow-auto rounded border border-bs-border bg-bs-bg-sidebar p-2">
-        <div>
-          <div className="text-bs-text">client playground</div>
-          <div className="text-[10px] text-bs-text-faint">run a client file or invoke runtime operations</div>
+    <div className="flex h-full min-h-0 flex-col text-[11px]">
+      {/* Shared top bar */}
+      <div className="flex h-[34px] flex-none items-center gap-2 border-b border-bs-border bg-bs-bg-panel px-2">
+        <ClientTargetField className="flex-1 min-w-0 max-w-md" />
+        <button
+          onClick={forceConnect}
+          disabled={isConnecting}
+          className={`flex h-[26px] w-[26px] flex-none items-center justify-center rounded border border-bs-border bg-bs-bg-editor text-bs-text-faint hover:bg-bs-bg-hover hover:text-bs-text ${isConnecting ? 'animate-spin' : ''}`}
+          title="Connect / Sync"
+        >
+          ↻
+        </button>
+        <div className="flex-1" />
+        <div className="mx-1 h-4 w-px bg-bs-border" />
+        <div className="flex items-center gap-0.5">
+          {(['client', 'swagger', 'redoc', 'json', 'yaml'] as const).map((m) => (
+            <button
+              key={m}
+              onClick={() => setMode(m)}
+              className={`rounded px-2 py-1 text-[10px] font-medium ${
+                mode === m
+                  ? 'bg-bs-bg-active text-bs-text'
+                  : 'text-bs-text-faint hover:bg-bs-bg-hover hover:text-bs-text-muted'
+              }`}
+            >
+              {m === 'client' ? 'Client' : m === 'swagger' ? 'Swagger' : m === 'redoc' ? 'Redoc' : m === 'json' ? 'JSON' : 'YAML'}
+            </button>
+          ))}
         </div>
-        <div className="text-[10px] text-bs-text-faint">target url</div>
-        <div className="flex items-center gap-2">
-          <ClientTargetField className="flex-1" />
-          <button
-            onClick={() => void runClientFile(selectedClientPath)}
-            className="flex h-[30px] w-[30px] items-center justify-center rounded bg-bs-good text-bs-accent-text hover:opacity-90"
-            aria-label="Run client"
-            title="Run client"
-          >
-            ▶
-          </button>
+      </div>
+
+      {error && (
+        <div className="flex-none border-b border-bs-border bg-bs-error/10 px-3 py-1.5 text-bs-error whitespace-pre-wrap overflow-auto max-h-24 font-mono text-[10px]">
+          {error}
         </div>
-        <div className="text-[10px] text-bs-text-faint">
-          client file: {selectedClientPath || 'none selected'}
-        </div>
-        <div className="border-t border-bs-border pt-2 text-bs-text">operations</div>
-        <div className="flex flex-col gap-2">
-          {operations.length > 0 ? operations.map((operation) => (
-            <div key={operation.id} className="rounded border border-bs-border bg-bs-bg-panel px-2 py-2">
-              <div className="text-bs-text">{operation.id}</div>
-              <div className="text-[10px] text-bs-text-faint">
-                {operation.method} {operation.path}
+      )}
+
+      {/* Body */}
+      <div className="min-h-0 flex-1 h-0">
+        {mode === 'client' ? (
+          <ApiClientBody
+            operations={operations}
+            invocationDrafts={invocationDrafts}
+            setInvocationDraft={setInvocationDraft}
+            invokeOperation={invokeOperation}
+            isConnecting={isConnecting}
+          />
+        ) : mode === 'swagger' ? (
+          <div className="h-full overflow-auto bg-white">
+            {stableSpec ? (
+              <SwaggerUI spec={stableSpec} />
+            ) : (
+              <div className="p-8 text-sm text-gray-400">
+                No OpenAPI document loaded yet. Start a server or connect to a target.
               </div>
-              <textarea
-                value={invocationDrafts[operation.id] ?? '{}'}
-                onChange={(event) => setInvocationDraft(operation.id, event.target.value)}
-                spellCheck={false}
-                className="mt-2 h-24 w-full resize-y rounded border border-bs-border bg-bs-bg-sidebar px-2 py-1 font-mono text-[10px] text-bs-text outline-none focus:border-bs-border-focus"
-              />
-              <button
-                onClick={() => void invokeOperation(operation.id)}
-                className="mt-2 rounded bg-bs-bg-hover px-2 py-0.5 text-bs-text hover:bg-bs-bg-active"
-              >
-                invoke
-              </button>
-            </div>
+            )}
+          </div>
+        ) : mode === 'redoc' ? (
+          <div className="h-full overflow-auto bg-white">
+            {stableSpec ? (
+              <RedocStandalone spec={stableSpec} />
+            ) : (
+              <div className="p-8 text-sm text-gray-400">
+                No OpenAPI document loaded yet. Start a server or connect to a target.
+              </div>
+            )}
+          </div>
+        ) : (
+          <ReadonlyMonacoView
+            content={openapiDocument}
+            language={mode === 'yaml' ? 'yaml' : 'json'}
+          />
+        )}
+      </div>
+    </div>
+  )
+}
+
+/** Minimal JSON→YAML serializer (no dependency). Handles the shapes OpenAPI produces. */
+function jsonToYaml(value: unknown, indent = 0): string {
+  const pad = '  '.repeat(indent)
+  if (value === null || value === undefined) return 'null'
+  if (typeof value === 'boolean' || typeof value === 'number') return String(value)
+  if (typeof value === 'string') {
+    if (value.includes('\n')) return `|\n${value.split('\n').map((l) => `${pad}  ${l}`).join('\n')}`
+    if (/[:{}\[\],&*?|>!%#@`"']/.test(value) || value === '' || value.trim() !== value) return JSON.stringify(value)
+    return value
+  }
+  if (Array.isArray(value)) {
+    if (value.length === 0) return '[]'
+    return value.map((item) => {
+      const inner = jsonToYaml(item, indent + 1)
+      return inner.includes('\n') && (typeof item === 'object')
+        ? `${pad}- ${inner.trimStart()}`
+        : `${pad}- ${inner}`
+    }).join('\n')
+  }
+  if (typeof value === 'object') {
+    const entries = Object.entries(value as Record<string, unknown>)
+    if (entries.length === 0) return '{}'
+    return entries.map(([k, v]) => {
+      const key = /[:{}\[\],&*?|>!%#@`"'\s]/.test(k) ? JSON.stringify(k) : k
+      if (v && typeof v === 'object' && !Array.isArray(v) && Object.keys(v as object).length > 0) {
+        return `${pad}${key}:\n${jsonToYaml(v, indent + 1)}`
+      }
+      if (Array.isArray(v) && v.length > 0) {
+        return `${pad}${key}:\n${jsonToYaml(v, indent + 1)}`
+      }
+      return `${pad}${key}: ${jsonToYaml(v, indent + 1)}`
+    }).join('\n')
+  }
+  return String(value)
+}
+
+function ReadonlyMonacoView({ content, language }: { content: Record<string, unknown> | null; language: 'json' | 'yaml' }) {
+  const containerRef = useRef<HTMLDivElement>(null)
+  const editorRef = useRef<monaco.editor.IStandaloneCodeEditor | null>(null)
+
+  const text = useMemo(() => {
+    if (!content) return ''
+    return language === 'yaml' ? jsonToYaml(content) : JSON.stringify(content, null, 2)
+  }, [content, language])
+
+  useEffect(() => {
+    if (!containerRef.current) return
+
+    if (!editorRef.current) {
+      editorRef.current = monaco.editor.create(containerRef.current, {
+        value: text,
+        language,
+        readOnly: true,
+        minimap: { enabled: false },
+        lineNumbers: 'on',
+        scrollBeyondLastLine: false,
+        fontSize: 12,
+        automaticLayout: true,
+        wordWrap: 'on',
+      })
+    } else {
+      const model = editorRef.current.getModel()
+      if (model) {
+        monaco.editor.setModelLanguage(model, language)
+        model.setValue(text)
+      }
+    }
+
+    return () => {}
+  }, [text, language])
+
+  useEffect(() => {
+    return () => {
+      editorRef.current?.dispose()
+      editorRef.current = null
+    }
+  }, [])
+
+  if (!content) {
+    return (
+      <div className="flex h-full items-center justify-center text-sm text-bs-text-faint">
+        No OpenAPI document loaded yet. Start a server or connect to a target.
+      </div>
+    )
+  }
+
+  return <div ref={containerRef} className="h-full w-full" />
+}
+
+function ApiClientBody({
+  operations,
+  invocationDrafts,
+  setInvocationDraft,
+  invokeOperation,
+  isConnecting,
+}: {
+  operations: RuntimeOperation[]
+  invocationDrafts: Record<string, string>
+  setInvocationDraft: (operationId: string, draft: string) => void
+  invokeOperation: (id: string) => Promise<void>
+  isConnecting: boolean
+}) {
+  const [pending, setPending] = useState<string | null>(null)
+  const [lastResult, setLastResult] = useState<{ ok: boolean; operationId: string; label: string; result?: unknown; error?: { message: string }; durationMs: number } | null>(null)
+  const requests = useRuntimeStore((state) => state.requests)
+
+  // Sync from store whenever requests change
+  useEffect(() => {
+    if (requests.length > 0) {
+      const r = requests[0]
+      setLastResult({
+        ok: r.ok,
+        operationId: r.operationId,
+        label: r.operationLabel ?? r.operationId,
+        result: r.result,
+        error: r.error,
+        durationMs: r.durationMs,
+      })
+      setPending(null)
+    }
+  }, [requests])
+
+  const handleInvoke = async (operationId: string) => {
+    const op = operations.find((o) => o.id === operationId)
+    setPending(op?.label ?? operationId)
+    setLastResult(null)
+    try {
+      await invokeOperation(operationId)
+    } catch (e) {
+      setLastResult({
+        ok: false,
+        operationId,
+        label: op?.label ?? operationId,
+        error: { message: e instanceof Error ? e.message : String(e) },
+        durationMs: 0,
+      })
+    } finally {
+      setPending(null)
+    }
+  }
+
+   return (
+     <div className="flex h-full min-h-0 bg-bs-bg-panel p-3 text-[11px]">
+       <div className="flex w-[400px] flex-none flex-col gap-1 overflow-auto rounded border border-bs-border bg-bs-bg-sidebar p-3 shadow-sm">
+          {operations.length > 0 ? operations.map((operation) => (
+            <OperationItem
+              key={operation.id}
+              operation={operation}
+              draft={invocationDrafts[operation.id] ?? '{}'}
+              setDraft={(val) => setInvocationDraft(operation.id, val)}
+              invoke={handleInvoke}
+              latestRequest={requests.find((r) => r.operationId === operation.id) ?? null}
+            />
           )) : (
-            <div className="text-bs-text-faint">launch a runtime to inspect client operations</div>
+           <div className="py-4 text-center text-bs-text-faint italic border border-dashed border-bs-border rounded">
+             {isConnecting ? 'Fetching operations...' : 'Connect to a target to see methods'}
+           </div>
+         )}
+      </div>
+
+      <div className="ml-3 flex min-w-0 flex-1 flex-col rounded border border-bs-border bg-bs-bg-sidebar shadow-sm">
+        <div className="flex-none border-b border-bs-border bg-bs-bg-panel px-3 py-2 text-[10px] font-semibold uppercase tracking-wider text-bs-text">
+          Latest Result
+        </div>
+        <div className="min-h-0 flex-1 overflow-auto p-4">
+          {pending ? (
+            <div className="flex flex-col items-center justify-center gap-2 py-8 text-bs-text-faint">
+              <div className="h-5 w-5 animate-spin rounded-full border-2 border-bs-border border-t-bs-accent" />
+              <span>Running {pending}...</span>
+            </div>
+          ) : lastResult ? (
+            <div className="rounded border border-bs-border bg-bs-bg-panel p-3">
+              <div className="flex items-center justify-between border-b border-bs-border pb-2 mb-2">
+                <div className="flex items-center gap-2">
+                  <div className={`h-2 w-2 rounded-full ${lastResult.ok ? 'bg-bs-good' : 'bg-bs-error'}`} />
+                  <span className="font-bold text-bs-text uppercase text-[10px]">{lastResult.label}</span>
+                  <span className="text-bs-text-faint text-[9px] uppercase tracking-tighter">{lastResult.ok ? 'Success' : 'Error'}</span>
+                </div>
+                {lastResult.durationMs > 0 && (
+                  <span className="text-bs-text-faint font-mono text-[10px]">{lastResult.durationMs}ms</span>
+                )}
+              </div>
+              {lastResult.error ? <div className="text-bs-error font-medium mb-3">{lastResult.error.message}</div> : null}
+              <pre className="overflow-auto whitespace-pre-wrap text-[11px] text-bs-text p-2 bg-bs-bg-sidebar rounded border border-bs-border">
+                {JSON.stringify(lastResult.ok ? (lastResult.result ?? null) : (lastResult.error ?? null), null, 2)}
+              </pre>
+            </div>
+          ) : (
+            <div className="flex items-center justify-center py-8 text-bs-text-faint italic">
+              Invoke a method to see results here
+            </div>
           )}
         </div>
       </div>
+    </div>
+  )
+}
 
-      <div className="min-w-0 flex-1 overflow-auto rounded border border-bs-border bg-bs-bg-sidebar p-3">
-        <div className="mb-2 text-bs-text">latest client run</div>
-        {clientRun ? (
-          <div className="flex flex-col gap-2">
-            <div className="rounded border border-bs-border bg-bs-bg-panel px-3 py-2">
-              <div className="flex items-center gap-2">
-                <span className="text-bs-text">{clientRun.status}</span>
-                <span className="text-[10px] text-bs-text-faint">{clientRun.filePath}</span>
-                <span className="text-[10px] text-bs-text-faint">{clientRun.targetUrl ?? targetPlaceholder}</span>
-                {clientRun.durationMs ? (
-                  <span className="text-[10px] text-bs-text-faint">{clientRun.durationMs}ms</span>
-                ) : null}
-              </div>
-              {clientRun.error ? <div className="mt-2 text-bs-error">{clientRun.error}</div> : null}
-              {typeof clientRun.result !== 'undefined' ? (
-                <>
-                  <div className="mt-2 text-[10px] uppercase tracking-wide text-bs-text-faint">result</div>
-                  <pre className="mt-1 overflow-auto whitespace-pre-wrap text-[10px] text-bs-text-muted">
-                    {JSON.stringify(clientRun.result, null, 2)}
-                  </pre>
-                </>
-              ) : null}
-            </div>
-            <div className="rounded border border-bs-border bg-bs-bg-panel px-3 py-2">
-              <div className="text-[10px] uppercase tracking-wide text-bs-text-faint">console</div>
-              {clientRun.logs.length > 0 ? (
-                <pre className="mt-1 overflow-auto whitespace-pre-wrap text-[10px] text-bs-text-muted">
-                  {clientRun.logs.join('\n')}
-                </pre>
-              ) : (
-                <div className="mt-1 text-bs-text-faint">no client console output</div>
-              )}
-            </div>
-          </div>
-        ) : (
-          <div className="text-bs-text-faint">run a client to inspect results here</div>
+function OperationItem({
+  operation,
+  draft,
+  setDraft,
+  invoke,
+  latestRequest,
+}: {
+  operation: RuntimeOperation
+  draft: string
+  setDraft: (value: string) => void
+  invoke: (id: string) => Promise<void>
+  latestRequest: RuntimeRequestEntry | null
+}) {
+  const [isExpanded, setIsExpanded] = useState(false)
+
+  return (
+    <div className="mb-1 overflow-hidden rounded border border-bs-border bg-bs-bg-panel transition-all">
+      <div
+        className="flex items-center gap-2 p-2 cursor-pointer hover:bg-bs-bg-hover"
+        onClick={() => setIsExpanded(!isExpanded)}
+      >
+        <span className={`text-[8px] text-bs-text-faint transition-transform duration-100 ${isExpanded ? 'rotate-90' : ''}`}>
+          ▶
+        </span>
+        <span className="font-mono text-[11px] font-semibold text-bs-text flex-1 truncate">
+          {operation.label}
+        </span>
+        {latestRequest && (
+          <div className={`h-1.5 w-1.5 rounded-full ${latestRequest.ok ? 'bg-bs-good' : 'bg-bs-error'}`} />
         )}
       </div>
+
+      {isExpanded && (
+        <div className="border-t border-bs-border bg-bs-bg-sidebar p-3 flex flex-col gap-3">
+          {operation.summary && (
+            <div className="text-bs-text-muted leading-relaxed text-[10px] italic">{operation.summary}</div>
+          )}
+
+          <OperationForm
+            operation={operation}
+            value={draft}
+            onChange={setDraft}
+          />
+
+          <div className="flex items-center justify-between pt-1">
+             <button
+               onClick={(e) => {
+                 e.stopPropagation()
+                 void invoke(operation.id)
+               }}
+               className="bg-bs-good text-bs-accent-text px-4 py-1 rounded text-[11px] font-bold hover:opacity-90 shadow-sm"
+             >
+               Run
+             </button>
+             {latestRequest && (
+               <span className="text-[10px] font-mono text-bs-text-faint">
+                 {latestRequest.durationMs}ms
+               </span>
+             )}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function OperationForm({
+  operation,
+  value,
+  onChange,
+}: {
+  operation: RuntimeOperation
+  value: string
+  onChange: (value: string) => void
+}) {
+  const schema = operation.inputSchema
+  const properties = schema?.properties as Record<string, any> | undefined
+
+  if (!properties || Object.keys(properties).length === 0) {
+    return null
+  }
+
+  let json: any = {}
+  try {
+    json = JSON.parse(value)
+  } catch (e) {
+    return (
+      <textarea
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        spellCheck={false}
+        className="h-24 w-full resize-y rounded border border-bs-border bg-bs-bg-panel px-2 py-1 font-mono text-[10px] text-bs-text outline-none focus:border-bs-border-focus"
+      />
+    )
+  }
+
+  return (
+    <div className="flex flex-col gap-3 border-l-2 border-bs-border pl-3">
+      {Object.entries(properties).map(([key, propSchema]) => {
+        const val = json[key]
+        const update = (newVal: any) => {
+          onChange(JSON.stringify({ ...json, [key]: newVal }, null, 2))
+        }
+
+        return (
+          <div key={key} className="flex flex-col gap-1.5">
+            <div className="flex items-center justify-between gap-2">
+              <label className="text-[10px] text-bs-text font-bold font-mono">{key}</label>
+              <span className="text-[9px] text-bs-text-faint font-mono uppercase">{propSchema.type}</span>
+            </div>
+            {propSchema.type === 'boolean' ? (
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={!!val}
+                  onChange={e => update(e.target.checked)}
+                  className="w-3.5 h-3.5 rounded border-bs-border bg-bs-bg-panel accent-bs-good"
+                />
+                <span className="text-[10px] text-bs-text-muted">{!!val ? 'true' : 'false'}</span>
+              </label>
+            ) : propSchema.type === 'number' || propSchema.type === 'integer' ? (
+              <input
+                type="number"
+                value={val ?? ''}
+                onChange={e => update(e.target.value === '' ? undefined : Number(e.target.value))}
+                className="w-full rounded border border-bs-border bg-bs-bg-panel px-2 py-1 text-[11px] text-bs-text outline-none focus:border-bs-border-focus font-mono"
+              />
+            ) : (
+              <input
+                type="text"
+                value={typeof val === 'string' ? val : (val === undefined ? '' : JSON.stringify(val))}
+                onChange={e => update(e.target.value)}
+                className="w-full rounded border border-bs-border bg-bs-bg-panel px-2 py-1 text-[11px] text-bs-text outline-none focus:border-bs-border-focus font-mono"
+              />
+            )}
+            {propSchema.description && (
+              <div className="text-[9px] text-bs-text-faint leading-tight italic">{propSchema.description}</div>
+            )}
+          </div>
+        )
+      })}
     </div>
   )
 }
@@ -373,117 +769,6 @@ function DataView() {
   )
 }
 
-function OpenApiView({ variant }: { variant: 'swagger' | 'redoc' }) {
-  const openapiDocument = useRuntimeStore((state) => state.openapiDocument)
-  const operations = useRuntimeStore((state) => state.operations)
-  const serverName = useRuntimeStore((state) => state.serverName)
-  const connectionUrl = useRuntimeStore((state) => state.connectionUrl)
-  const title = variant === 'swagger' ? 'Swagger' : 'Redoc'
-  const info = openapiDocument?.info as { title?: string; description?: string } | undefined
-  const paths = Object.entries((openapiDocument?.paths as Record<string, Record<string, { summary?: string; description?: string }>> | undefined) ?? {})
-
-  return (
-    <div className={`h-full overflow-auto p-4 text-[11px] ${variant === 'swagger' ? 'bg-bs-bg-editor' : 'bg-bs-bg-sidebar'}`}>
-      <div className="mx-auto flex max-w-5xl flex-col gap-4">
-        <div className="rounded border border-bs-border bg-bs-bg-panel px-4 py-3">
-          <div className="flex items-center gap-3">
-            <div className="text-lg text-bs-text">{title}</div>
-            {openapiDocument ? (
-              <div className="rounded bg-bs-bg-hover px-2 py-0.5 text-[10px] uppercase tracking-wide text-bs-text-faint">
-                OpenAPI {(openapiDocument.openapi as string | undefined) ?? '3.x'}
-              </div>
-            ) : null}
-          </div>
-          <div className="mt-2 text-bs-text-muted">
-            {openapiDocument
-              ? (info?.title ?? serverName ?? 'Browser runtime API')
-              : 'OpenAPI target'}
-          </div>
-          {openapiDocument && info?.description ? (
-            <div className="mt-1 text-bs-text-faint">
-              {info.description}
-            </div>
-          ) : null}
-          <div className="mt-3">
-            <div className="mb-1 text-[10px] uppercase tracking-wide text-bs-text-faint">target url</div>
-            <ClientTargetField />
-          </div>
-          <div className="mt-2 text-[10px] text-bs-text-faint">
-            {connectionUrl ?? (serverName ? `css://${serverName}` : 'enter or choose a target url')}
-          </div>
-        </div>
-
-        {!openapiDocument ? (
-          <div className="rounded border border-bs-border bg-bs-bg-panel px-5 py-8 text-sm text-bs-text-faint">
-            No active OpenAPI document is loaded for this pane yet.
-          </div>
-        ) : variant === 'swagger' ? (
-          <div className="rounded border border-bs-border bg-bs-bg-panel px-4 py-3">
-            <div className="mb-2 text-[10px] uppercase tracking-wide text-bs-text-faint">Operations</div>
-            <div className="flex flex-col gap-2">
-              {operations.map((operation) => (
-                <div key={`${operation.method}:${operation.path}`} className="rounded border border-bs-border bg-bs-bg-sidebar px-3 py-2">
-                  <div className="flex items-center gap-2">
-                    <span className="rounded bg-bs-accent px-1.5 py-0.5 text-[10px] text-bs-accent-text">
-                      {operation.method}
-                    </span>
-                    <span className="font-mono text-bs-text">{operation.path}</span>
-                  </div>
-                  <div className="mt-1 text-bs-text-muted">{operation.summary ?? operation.id}</div>
-                  {operation.inputSchema ? (
-                    <pre className="mt-2 overflow-auto whitespace-pre-wrap rounded bg-bs-bg-panel px-2 py-2 text-[10px] text-bs-text-faint">
-                      {JSON.stringify(operation.inputSchema, null, 2)}
-                    </pre>
-                  ) : null}
-                </div>
-              ))}
-            </div>
-          </div>
-        ) : (
-          <div className="rounded border border-bs-border bg-bs-bg-panel px-5 py-5">
-            <div className="mb-4 text-xl text-bs-text">
-              {(openapiDocument.info as { title?: string } | undefined)?.title ?? 'API Reference'}
-            </div>
-            <div className="flex flex-col gap-5">
-              {paths.map(([pathKey, methods]) => (
-                <div key={pathKey} className="border-l-2 border-bs-accent pl-4">
-                  <div className="font-mono text-sm text-bs-text">{pathKey}</div>
-                  <div className="mt-2 flex flex-col gap-3">
-                    {Object.entries(methods ?? {}).map(([method, spec]) => (
-                      <div key={`${method}:${pathKey}`} className="rounded border border-bs-border bg-bs-bg-sidebar px-3 py-3">
-                        <div className="flex items-center gap-2">
-                          <span className="rounded bg-bs-bg-active px-2 py-0.5 text-[10px] uppercase tracking-wide text-bs-text">
-                            {method}
-                          </span>
-                          <span className="text-bs-text">{spec?.summary ?? `${method.toUpperCase()} ${pathKey}`}</span>
-                        </div>
-                        {(spec as { description?: string } | undefined)?.description ? (
-                          <div className="mt-2 text-bs-text-muted">
-                            {(spec as { description?: string }).description}
-                          </div>
-                        ) : null}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {openapiDocument ? (
-          <details className="rounded border border-bs-border bg-bs-bg-panel px-4 py-3">
-            <summary className="cursor-pointer text-bs-text-faint">raw OpenAPI</summary>
-            <pre className="mt-3 overflow-auto whitespace-pre-wrap text-[10px] text-bs-text-muted">
-              {JSON.stringify(openapiDocument, null, 2)}
-            </pre>
-          </details>
-        ) : null}
-      </div>
-    </div>
-  )
-}
-
 function HistoryView() {
   const sample = useWorkspaceStore((state) => state.sample)
   const files = useWorkspaceStore((state) => state.files)
@@ -495,9 +780,9 @@ function HistoryView() {
   const sidebarWidth = useLayoutStore((state) => state.sidebarWidth)
   const bottomHeight = useLayoutStore((state) => state.bottomHeight)
   const rightWidth = useLayoutStore((state) => state.rightWidth)
-  const showSidebar = useLayoutStore((state) => state.showSidebar)
-  const showBottom = useLayoutStore((state) => state.showBottom)
-  const showRight = useLayoutStore((state) => state.showRight)
+  const showSidebar = useLayoutStore((state) => state.sidebarWidth > 0)
+  const showBottom = useLayoutStore((state) => state.bottomHeight > 0)
+  const showRight = useLayoutStore((state) => state.rightWidth > 0)
 
   const saveCheckpoint = async (name: string, note?: string) => {
     const workspace: WorkspaceSnapshot = {
@@ -591,9 +876,7 @@ function CallsView() {
           >
             <div className="flex items-center gap-2">
               <span className={request.ok ? 'text-bs-good' : 'text-bs-error'}>{request.ok ? 'ok' : 'error'}</span>
-              <span className="text-bs-text">{request.operationId}</span>
-              <span className="text-bs-text-faint">{request.method}</span>
-              <span className="truncate text-bs-text-muted">{request.path}</span>
+              <span className="text-bs-text">{request.operationLabel ?? request.operationId}</span>
               <span className="text-bs-text-faint">{request.durationMs}ms</span>
             </div>
           </button>

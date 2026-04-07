@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type WheelEvent as ReactWheelEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type WheelEvent as ReactWheelEvent } from 'react'
 import * as monaco from 'monaco-editor'
 import * as XLSX from 'xlsx'
 import EditorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker&inline'
@@ -13,6 +13,8 @@ import { HtmlPreview, HtmlToolbar, type HtmlMode } from './HtmlPane'
 import { NotebookPreview, NotebookToolbar, type NotebookMode } from './NotebookPane'
 import { SvgPreview, SvgToolbar, type SvgMode } from './SvgPane'
 import { MenuButton } from './MenuButton'
+import { Resizer } from './Resizer'
+import { useLayoutStore } from '../store/layout'
 import { selectPaneRuntimeSession, useRuntimeStore } from '../store/runtime'
 import {
   editorViewDefinitions,
@@ -187,6 +189,41 @@ export function Editor({
     1 + Number(paneTabs.secondary.tabs.length > 0) + Number(paneTabs.tertiary.tabs.length > 0)
   const previewPaneCount = Math.max(actualVisiblePaneCount, dragPreviewPaneCount)
   const dragPreviewActive = previewPaneCount > actualVisiblePaneCount
+
+  // Resizable pane widths stored as fractional values that sum to 1 (persisted in layout store).
+  const editorContainerRef = useRef<HTMLDivElement>(null)
+  const paneFractions = useLayoutStore((state) => state.paneFractions)
+  const setPaneFractions = useLayoutStore((state) => state.setPaneFractions)
+
+  const resizePanes = useCallback(
+    (leftIndex: number, delta: number) => {
+      const container = editorContainerRef.current
+      if (!container) return
+      const totalWidth = container.clientWidth
+      if (totalWidth === 0) return
+      const fractionDelta = delta / totalWidth
+      const prev = useLayoutStore.getState().paneFractions
+      const next: [number, number, number] = [...prev]
+      const minFraction = 0.1
+      const rightIndex = leftIndex + 1
+      const newLeft = next[leftIndex] + fractionDelta
+      const newRight = next[rightIndex] - fractionDelta
+      if (newLeft < minFraction || newRight < minFraction) return
+      next[leftIndex] = newLeft
+      next[rightIndex] = newRight
+      setPaneFractions(next)
+    },
+    [setPaneFractions],
+  )
+
+  const paneStyle = (index: number, visibleCount: number): React.CSSProperties => {
+    if (visibleCount === 1) return { flex: '1 1 0%', minWidth: 0 }
+    // Normalize fractions to only the visible panes
+    const visibleFracs = paneFractions.slice(0, visibleCount)
+    const sum = visibleFracs.reduce((a, b) => a + b, 0)
+    const pct = ((visibleFracs[index] / sum) * 100).toFixed(4)
+    return { width: `${pct}%`, minWidth: 0, flexShrink: 0, flexGrow: 0 }
+  }
   const dragDropActive = Boolean(onDropToPane)
   const primaryView = getEditorViewId(primaryPath)
   const secondaryView = getEditorViewId(secondaryPath)
@@ -289,8 +326,9 @@ export function Editor({
   }, [highlightedHandler, primaryFile, secondaryFile, tertiaryFile])
 
   return (
-    <div className="flex h-full w-full min-w-0">
+    <div ref={editorContainerRef} className="flex h-full w-full min-w-0">
       <EditorPaneChrome
+        style={paneStyle(0, previewPaneCount)}
         header={showPaneHeaders ? (
           <PaneTabHeader
             paths={primaryTabs}
@@ -332,8 +370,9 @@ export function Editor({
 
       {secondaryPath || previewPaneCount >= 2 ? (
         <>
-          <div className="w-px bg-bs-border" />
+          <Resizer direction="horizontal" onResize={(delta) => resizePanes(0, delta)} />
           <EditorPaneChrome
+            style={paneStyle(1, previewPaneCount)}
             header={showPaneHeaders ? (
               secondaryPath ? (
                 <PaneTabHeader
@@ -386,8 +425,9 @@ export function Editor({
 
       {tertiaryPath || previewPaneCount >= 3 ? (
         <>
-          <div className="w-px bg-bs-border" />
+          <Resizer direction="horizontal" onResize={(delta) => resizePanes(1, delta)} />
           <EditorPaneChrome
+            style={paneStyle(2, previewPaneCount)}
             header={showPaneHeaders ? (
               tertiaryPath ? (
                 <PaneTabHeader
@@ -497,6 +537,22 @@ export function Editor({
       renderLineHighlight: 'all',
       scrollBeyondLastLine: false,
       theme: 'browserver',
+    })
+    pane.editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
+      const model = pane.editor?.getModel()
+      if (!model) return
+      const path = model.uri.path
+      void useWorkspaceStore.getState().saveFile(path)
+    })
+    pane.editor.onDidBlurEditorText(() => {
+      const model = pane.editor?.getModel()
+      if (!model) return
+      const path = model.uri.path
+      const state = useWorkspaceStore.getState()
+      if (state.dirtyFilePaths.includes(path)) {
+        const file = state.files.find(f => f.path === path)
+        void state.saveFile(path, `Auto-save ${file?.name ?? path}`)
+      }
     })
     pane.decorations = pane.editor.createDecorationsCollection([])
     pane.editor.onDidChangeModelContent(() => {
@@ -925,6 +981,7 @@ function ImagePreview({ content, name }: { content: string; name: string }) {
 function EditorPaneChrome({
   header,
   active,
+  style,
   dropPane,
   dropActive,
   onHoverDropPane,
@@ -936,6 +993,7 @@ function EditorPaneChrome({
 }: {
   header?: React.ReactNode
   active: boolean
+  style?: React.CSSProperties
   dropPane?: EditorPaneId | null
   dropActive?: boolean
   onHoverDropPane?: (pane: EditorPaneId) => void
@@ -947,7 +1005,8 @@ function EditorPaneChrome({
 }) {
   return (
     <div
-      className={`relative flex min-w-0 flex-1 flex-col ${active ? 'bg-bs-bg-editor' : 'bg-bs-bg-panel'} ${
+      style={style}
+      className={`relative flex flex-col ${active ? 'bg-bs-bg-editor' : 'bg-bs-bg-panel'} ${
         dropActive ? 'bg-bs-accent/10' : ''
       }`}
       onMouseEnter={() => {
@@ -1052,6 +1111,7 @@ function PaneTabHeader({
   } | null>(null)
   const files = useWorkspaceStore((state) => state.files)
   const openFilePaths = useWorkspaceStore((state) => state.openFilePaths)
+  const dirtyFilePaths = useWorkspaceStore((state) => state.dirtyFilePaths)
   const openEditorView = useWorkspaceStore((state) => state.openEditorView)
   const createFile = useWorkspaceStore((state) => state.createFile)
   const setActiveFile = useWorkspaceStore((state) => state.setActiveFile)
@@ -1324,6 +1384,9 @@ function PaneTabHeader({
                     : 'border-t-2 border-t-transparent bg-bs-tab-inactive text-bs-text-muted hover:bg-bs-tab-hover hover:text-bs-text'
                 } ${reorderTargetPath === path ? 'shadow-[inset_2px_0_0_0_var(--bs-accent)]' : ''}`}
               >
+                {dirtyFilePaths.includes(path) ? (
+                  <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-bs-text-faint" aria-hidden="true" />
+                ) : null}
                 {isTabActive && runtime ? (
                   <span
                     className={`h-1.5 w-1.5 rounded-full ${

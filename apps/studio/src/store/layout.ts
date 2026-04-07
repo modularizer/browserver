@@ -109,12 +109,14 @@ interface LayoutState {
   showSidebar: boolean
   showBottom: boolean
   showRight: boolean
+  paneFractions: [number, number, number]
   setSidebarWidth: (w: number) => void
   setBottomHeight: (h: number) => void
   setRightWidth: (w: number) => void
   resizeSidebarBy: (delta: number) => void
   resizeBottomBy: (delta: number) => void
   resizeRightBy: (delta: number) => void
+  setPaneFractions: (fractions: [number, number, number]) => void
   toggleSidebar: () => void
   toggleBottom: () => void
   toggleRight: () => void
@@ -132,6 +134,7 @@ export const useLayoutStore = create<LayoutState>()(
       showSidebar: true,
       showBottom: true,
       showRight: false,
+      paneFractions: [1 / 3, 1 / 3, 1 / 3] as [number, number, number],
       setSidebarWidth: (w) => set({ sidebarWidth: Math.max(140, Math.min(560, w)), presetId: 'custom' }),
       setBottomHeight: (h) => set({ bottomHeight: Math.max(80, Math.min(720, h)), presetId: 'custom' }),
       setRightWidth: (w) => set({ rightWidth: Math.max(180, Math.min(720, w)), presetId: 'custom' }),
@@ -150,6 +153,7 @@ export const useLayoutStore = create<LayoutState>()(
           rightWidth: Math.max(180, Math.min(720, state.rightWidth + delta)),
           presetId: 'custom',
         })),
+      setPaneFractions: (fractions) => set({ paneFractions: fractions }),
       toggleSidebar: () => set((s) => ({ showSidebar: !s.showSidebar, presetId: 'custom' })),
       toggleBottom: () => set((s) => ({ showBottom: !s.showBottom, presetId: 'custom' })),
       toggleRight: () => set((s) => ({ showRight: !s.showRight, presetId: 'custom' })),

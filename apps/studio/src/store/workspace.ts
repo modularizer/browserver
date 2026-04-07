@@ -1,11 +1,16 @@
-import { create } from 'zustand'
+ import { create } from 'zustand'
 import {
   loadWorkspaceSnapshot,
   saveWorkspaceSnapshot,
   type WorkspaceSnapshot,
   type StoredWorkspaceFile,
+  StoredWorkspaceLanguage,
 } from '@browserver/storage'
 import { samples, type Sample, type SampleFile } from '../samples'
+import { useHistoryStore } from './history'
+import { commitWorkspace } from './git'
+import { useLayoutStore } from './layout'
+import { useThemeStore } from '../theme'
 
 export interface WorkspaceFile extends StoredWorkspaceFile {
   name: string
@@ -17,6 +22,7 @@ export type EditorPaneId = 'primary' | 'secondary' | 'tertiary'
 export type RightPanelTabId = 'inspector' | 'client' | 'trust'
 export type EditorViewId =
   | 'inspect'
+  | 'api'
   | 'client'
   | 'swagger'
   | 'redoc'
@@ -51,9 +57,7 @@ export interface WorkspaceEditorSession {
 
 export const editorViewDefinitions: Array<{ id: EditorViewId; label: string }> = [
   { id: 'inspect', label: 'Inspect' },
-  { id: 'client', label: 'Client' },
-  { id: 'swagger', label: 'Swagger' },
-  { id: 'redoc', label: 'Redoc' },
+  { id: 'api', label: 'API' },
   { id: 'data', label: 'Data' },
   { id: 'trust', label: 'Trust' },
   { id: 'history', label: 'History' },
@@ -64,6 +68,8 @@ export const editorViewDefinitions: Array<{ id: EditorViewId; label: string }> =
 ]
 
 interface WorkspaceState {
+  // Sync a .browserver.yaml config reflecting UI/theme/layout
+  syncBrowserYaml: () => void,
   hydrated: boolean
   sample: Sample
   files: WorkspaceFile[]
@@ -71,6 +77,7 @@ interface WorkspaceState {
   openFilePaths: string[]
   dirtyFilePaths: string[]
   saveState: 'idle' | 'saving' | 'saved'
+  saveError: string | null
   paneTabs: EditorPaneTabState
   paneFiles: EditorPaneAssignments
   activeEditorPane: EditorPaneId
@@ -110,6 +117,7 @@ interface WorkspaceState {
   setActivePanel: (panel: WorkbenchPanelId) => void
   setActiveRightPanelTab: (tab: RightPanelTabId) => void
   updateFileContent: (path: string, content: string) => void
+  saveFile: (path: string, message?: string) => Promise<void>
 }
 
 const saveTimers = new Map<string, number>()
@@ -513,6 +521,11 @@ function workspaceUiKey(workspaceId: string): string {
 
 function persistWorkspaceUiState(workspaceId: string, session: WorkspaceEditorSession) {
   window.localStorage.setItem(workspaceUiKey(workspaceId), JSON.stringify(session))
+  try {
+    useWorkspaceStore.getState().syncBrowserYaml()
+  } catch {
+    // ignore
+  }
 }
 
 function buildEditorSessionSnapshot(state: Pick<
@@ -832,7 +845,191 @@ function resolveActiveFilePath(paneTabs: EditorPaneTabState, pane: EditorPaneId)
     ?? ''
 }
 
+interface BrowserYamlRuntime {
+  /** Map from pane id to the file path of the server that was running. */
+  runningServers: Partial<Record<EditorPaneId, string>>
+}
+
+function buildBrowserYaml(
+  themeId: string,
+  layout: { sidebarWidth: number; bottomHeight: number; rightWidth: number; showSidebar: boolean; showBottom: boolean; showRight: boolean },
+  session: WorkspaceEditorSession & { activePanel?: WorkbenchPanelId },
+  runtime?: BrowserYamlRuntime,
+): string {
+  const lines: string[] = []
+  lines.push('# browserver UI state')
+  lines.push(`theme: ${themeId}`)
+  lines.push('layout:')
+  lines.push(`  sidebarWidth: ${Math.round(layout.sidebarWidth)}`)
+  lines.push(`  bottomHeight: ${Math.round(layout.bottomHeight)}`)
+  lines.push(`  rightWidth: ${Math.round(layout.rightWidth)}`)
+  lines.push(`  showSidebar: ${layout.showSidebar ? 'true' : 'false'}`)
+  lines.push(`  showBottom: ${layout.showBottom ? 'true' : 'false'}`)
+  lines.push(`  showRight: ${layout.showRight ? 'true' : 'false'}`)
+  if (session.activePanel) lines.push(`activePanel: ${session.activePanel}`)
+  lines.push(`activeBottomPanel: ${session.activeBottomPanel}`)
+  lines.push(`activeRightPanelTab: ${session.activeRightPanelTab}`)
+  lines.push('panes:')
+  for (const pane of ['primary','secondary','tertiary'] as EditorPaneId[]) {
+    const tabs = session.paneTabs?.[pane]?.tabs ?? []
+    const active = session.paneTabs?.[pane]?.activePath ?? null
+    lines.push(`  ${pane}:`)
+    lines.push(`    active: ${active ?? ''}`)
+    lines.push('    tabs:')
+    for (const t of tabs) lines.push(`      - ${t}`)
+  }
+  lines.push('openFiles:')
+  for (const p of session.openFilePaths ?? []) lines.push(`  - ${p}`)
+  lines.push('folders:')
+  for (const f of session.folders ?? []) lines.push(`  - ${f}`)
+  if (runtime && Object.keys(runtime.runningServers).length > 0) {
+    lines.push('runtime:')
+    lines.push('  servers:')
+    for (const [pane, filePath] of Object.entries(runtime.runningServers)) {
+      if (filePath) lines.push(`    ${pane}: ${filePath}`)
+    }
+  }
+  return lines.join('\n') + '\n'
+}
+
+export function parseBrowserYaml(content: string): any {
+  const result: any = {
+    layout: {},
+    panes: {
+      primary: { tabs: [] },
+      secondary: { tabs: [] },
+      tertiary: { tabs: [] }
+    },
+    openFiles: [],
+    folders: [],
+    runtime: { servers: {} },
+  };
+  const lines = content.split('\n');
+  let currentSection = '';
+  let currentPane: 'primary' | 'secondary' | 'tertiary' | '' = '';
+  let inRuntimeServers = false;
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+
+    if (!line.startsWith(' ') && !line.startsWith('-')) {
+      const parts = trimmed.split(':');
+      const key = parts[0].trim();
+      const value = parts.slice(1).join(':').trim();
+      inRuntimeServers = false;
+
+      if (key === 'theme') {
+        result.theme = value;
+      } else if (key === 'layout') {
+        currentSection = 'layout';
+      } else if (key === 'panes') {
+        currentSection = 'panes';
+      } else if (key === 'openFiles') {
+        currentSection = 'openFiles';
+      } else if (key === 'folders') {
+        currentSection = 'folders';
+      } else if (key === 'runtime') {
+        currentSection = 'runtime';
+      } else if (key === 'activePanel') {
+        result.activePanel = value;
+      } else if (key === 'activeBottomPanel') {
+        result.activeBottomPanel = value;
+      } else if (key === 'activeRightPanelTab') {
+        result.activeRightPanelTab = value;
+      }
+    } else if (currentSection === 'layout' && trimmed.includes(':')) {
+      const [key, value] = trimmed.split(':').map(s => s.trim());
+      if (key === 'sidebarWidth' || key === 'bottomHeight' || key === 'rightWidth') {
+        result.layout[key] = Number(value) || 0;
+      } else {
+        result.layout[key] = value === 'true';
+      }
+    } else if (currentSection === 'panes') {
+      if (line.startsWith('  ') && !line.startsWith('    ') && trimmed.endsWith(':')) {
+        currentPane = trimmed.slice(0, -1).trim() as any;
+      } else if (currentPane && trimmed.startsWith('active:')) {
+        result.panes[currentPane].active = trimmed.split(':')[1].trim() || null;
+      } else if (currentPane && trimmed.startsWith('-')) {
+        result.panes[currentPane].tabs.push(trimmed.slice(1).trim());
+      }
+    } else if (currentSection === 'runtime') {
+      if (trimmed === 'servers:') {
+        inRuntimeServers = true;
+      } else if (inRuntimeServers && trimmed.includes(':')) {
+        const [pane, ...rest] = trimmed.split(':');
+        const filePath = rest.join(':').trim();
+        if (filePath) result.runtime.servers[pane.trim()] = filePath;
+      }
+    } else if (currentSection === 'openFiles' && trimmed.startsWith('-')) {
+      result.openFiles.push(trimmed.slice(1).trim());
+    } else if (currentSection === 'folders' && trimmed.startsWith('-')) {
+      result.folders.push(trimmed.slice(1).trim());
+    }
+  }
+  return result;
+}
+
 export const useWorkspaceStore = create<WorkspaceState>()((set, get) => ({
+  syncBrowserYaml: () => {
+    const state = get()
+    const name = '.browserver.yaml'
+    const path = toPath(state.sample.id, name)
+    if (state.dirtyFilePaths.includes(path)) return
+
+    const themeId = useThemeStore.getState().themeId
+    const layout = useLayoutStore.getState()
+    const session = state.editorSession()
+
+    // Collect running server panes (lazy import to avoid circular dep)
+    let runtimeInfo: BrowserYamlRuntime | undefined
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { useRuntimeStore } = require('./runtime') as typeof import('./runtime')
+      const rtState = useRuntimeStore.getState()
+      const runningServers: Partial<Record<EditorPaneId, string>> = {}
+      for (const pane of ['primary', 'secondary', 'tertiary'] as EditorPaneId[]) {
+        const ps = rtState.paneSessions[pane]
+        if (ps.mode === 'server' && ps.status === 'running' && ps.launchedFilePath) {
+          runningServers[pane] = ps.launchedFilePath
+        }
+      }
+      if (Object.keys(runningServers).length > 0) {
+        runtimeInfo = { runningServers }
+      }
+    } catch { /* ignore if runtime store not available */ }
+
+    const yaml = buildBrowserYaml(themeId, {
+      sidebarWidth: layout.sidebarWidth,
+      bottomHeight: layout.bottomHeight,
+      rightWidth: layout.rightWidth,
+      showSidebar: layout.showSidebar,
+      showBottom: layout.showBottom,
+      showRight: layout.showRight,
+    }, { ...session, activePanel: state.activePanel }, runtimeInfo)
+    
+    const existing = state.files.find((f) => f.name === name)
+    if (existing && existing.content === yaml) return
+    const now = Date.now()
+    const files = existing
+      ? state.files.map((f) => f.name === name ? { ...f, content: yaml, updatedAt: now } : f)
+      : [...state.files, { path, name, language: 'yaml' as StoredWorkspaceLanguage, content: yaml, updatedAt: now }]
+    const sample = existing
+      ? {
+          ...state.sample,
+          files: state.sample.files.map((f) => f.name === name ? ({ ...f, content: yaml }) as SampleFile : f),
+        }
+      : {
+          ...state.sample,
+          files: [...state.sample.files, { name, language: 'yaml' as StoredWorkspaceLanguage, content: yaml } as SampleFile],
+        }
+    set({ files, sample })
+    queueSave(currentSnapshot({ ...state, files, sample }), () => {
+      set((latest) => ({
+        dirtyFilePaths: latest.dirtyFilePaths.filter((p) => p !== path)
+      }))
+    })
+  },
   hydrated: false,
   sample: samples[0],
   files: sampleToSnapshot(samples[0]).files.map((file) => ({
@@ -843,6 +1040,7 @@ export const useWorkspaceStore = create<WorkspaceState>()((set, get) => ({
   openFilePaths: [toPath(samples[0].id, samples[0].files[0].name)],
   dirtyFilePaths: [],
   saveState: 'idle',
+  saveError: null,
   paneTabs: {
     primary: { tabs: [toPath(samples[0].id, samples[0].files[0].name)], activePath: toPath(samples[0].id, samples[0].files[0].name) },
     secondary: { tabs: [], activePath: null },
@@ -988,7 +1186,9 @@ export const useWorkspaceStore = create<WorkspaceState>()((set, get) => ({
       })
       return nextState
     }),
-  createFile: (pane = 'primary') =>
+  createFile: (pane = 'primary') => {
+    const history = useHistoryStore.getState()
+    history.begin('Create file')
     set((state) => {
       const name = buildUntitledFileName(state.files)
       const path = toPath(state.sample.id, name)
@@ -1032,8 +1232,12 @@ export const useWorkspaceStore = create<WorkspaceState>()((set, get) => ({
         folders: state.folders,
       })
       return nextState
-    }),
-  createFolder: (pane = 'primary') =>
+    })
+    void history.commit(get().sample.id)
+  },
+  createFolder: (pane = 'primary') => {
+    const history = useHistoryStore.getState()
+    history.begin('Create folder')
     set((state) => {
       const folderPath = buildUntitledFolderPath(state.files).replace(/\/index\.ts$/, '')
       const folders = Array.from(new Set([...state.folders, folderPath]))
@@ -1048,20 +1252,25 @@ export const useWorkspaceStore = create<WorkspaceState>()((set, get) => ({
         folders,
       })
       return nextState
-    }),
+    })
+    void history.commit(get().sample.id)
+  },
   startRenaming: (path) => set({ renamingPath: path }),
   startRenamingFolder: (folderPath) => set({ renamingFolderPath: folderPath, renamingPath: null }),
   cancelRenaming: () => set({ renamingPath: null, renamingFolderPath: null }),
   renameFile: (path, nextName) => {
+    const history = useHistoryStore.getState()
+    history.begin('Rename file')
     const trimmed = nextName.trim()
-    if (!trimmed) return false
+    if (!trimmed) { history.abort(); return false }
 
     const state = get()
     const target = state.files.find((file) => file.path === path)
-    if (!target) return false
-    if (!isUniqueFileName(state.files, path, trimmed)) return false
+    if (!target) { history.abort(); return false }
+    if (!isUniqueFileName(state.files, path, trimmed)) { history.abort(); return false }
     if (target.name === trimmed) {
       set({ renamingPath: null, renamingFolderPath: null })
+      history.abort()
       return true
     }
 
@@ -1130,22 +1339,26 @@ export const useWorkspaceStore = create<WorkspaceState>()((set, get) => ({
       ...nextState,
       folders: Array.from(new Set([...state.folders, parentFolderName(trimmed)].filter((folder): folder is string => Boolean(folder)))),
     })
+    void history.commit(get().sample.id)
     return true
   },
   renameFolder: (folderPath, nextName) => {
+    const history = useHistoryStore.getState()
+    history.begin('Rename folder')
     const trimmedBase = nextName.trim().replace(/\/+$/g, '')
-    if (!trimmedBase || trimmedBase.includes('/')) return false
+    if (!trimmedBase || trimmedBase.includes('/')) { history.abort(); return false }
 
     const state = get()
     const sourcePrefix = `${folderPath}/`
     const affected = state.files.filter((file) => file.name.startsWith(sourcePrefix))
     const affectsFolderState = state.folders.some((folder) => folder === folderPath || folder.startsWith(sourcePrefix))
-    if (affected.length === 0 && !affectsFolderState) return false
+    if (affected.length === 0 && !affectsFolderState) { history.abort(); return false }
 
     const parent = parentFolderName(folderPath)
     const nextFolderPath = parent ? `${parent}/${trimmedBase}` : trimmedBase
     if (nextFolderPath === folderPath) {
       set({ renamingFolderPath: null, renamingPath: null })
+      history.abort()
       return true
     }
 
@@ -1154,7 +1367,7 @@ export const useWorkspaceStore = create<WorkspaceState>()((set, get) => ({
       const suffix = file.name.slice(sourcePrefix.length)
       renameMap.set(file.name, `${nextFolderPath}/${suffix}`)
     }
-    if (!fileNamesAreUnique(state.files, renameMap)) return false
+    if (!fileNamesAreUnique(state.files, renameMap)) { history.abort(); return false }
 
     const nextState = {
       ...renameWorkspaceFiles(state, renameMap),
@@ -1186,11 +1399,14 @@ export const useWorkspaceStore = create<WorkspaceState>()((set, get) => ({
     })
 
     set(nextState)
+    void history.commit(get().sample.id)
     return true
   },
   deleteFile: (path) => {
+    const history = useHistoryStore.getState()
+    history.begin('Delete file')
     const state = get()
-    if (state.files.length <= 1) return false
+    if (state.files.length <= 1) { history.abort(); return false }
 
     const files = state.files.filter((file) => file.path !== path)
     const sample = {
@@ -1199,7 +1415,7 @@ export const useWorkspaceStore = create<WorkspaceState>()((set, get) => ({
     }
     const nextPaneTabs = clonePaneTabs(state.paneTabs)
     const pane = findPaneForPath(nextPaneTabs, path)
-    if (!pane) return false
+    if (!pane) { history.abort(); return false }
     nextPaneTabs[pane].tabs = nextPaneTabs[pane].tabs.filter((entry) => entry !== path)
     nextPaneTabs[pane].activePath = nextPaneTabs[pane].activePath === path
       ? (nextPaneTabs[pane].tabs[0] ?? null)
@@ -1208,10 +1424,10 @@ export const useWorkspaceStore = create<WorkspaceState>()((set, get) => ({
     const paneTabs = normalizePaneTabs(nextPaneTabs, fallbackPath)
     const nextOpenFilePaths = deriveOpenFilePaths(paneTabs)
     const paneFiles = derivePaneAssignments(paneTabs, fallbackPath)
-    const activeEditorPane = getPaneFilePath(paneFiles, state.activeEditorPane) ? state.activeEditorPane : 'primary'
-    const activeFilePath = state.activeFilePath === path
-      ? resolveActiveFilePath(paneTabs, activeEditorPane)
-      : state.activeFilePath
+    const activeFileExists = getPaneFilePath(paneFiles, state.activeEditorPane)
+    const nextActiveEditorPane = activeFileExists ? state.activeEditorPane : 'primary'
+    const nextActiveFilePath = resolveActiveFilePath(paneTabs, nextActiveEditorPane)
+
     const dirtyFilePaths = state.dirtyFilePaths.filter((entry) => entry !== path)
     const nextState = {
       sample,
@@ -1219,8 +1435,8 @@ export const useWorkspaceStore = create<WorkspaceState>()((set, get) => ({
       openFilePaths: nextOpenFilePaths,
       paneTabs,
       paneFiles,
-      activeEditorPane,
-      activeFilePath,
+      activeEditorPane: nextActiveEditorPane,
+      activeFilePath: nextActiveFilePath,
       dirtyFilePaths,
       saveState: 'saving' as const,
       renamingPath: state.renamingPath === path ? null : state.renamingPath,
@@ -1243,17 +1459,20 @@ export const useWorkspaceStore = create<WorkspaceState>()((set, get) => ({
     })
 
     set(nextState)
+    void history.commit(get().sample.id)
     return true
   },
   deleteFolder: (folderPath) => {
+    const history = useHistoryStore.getState()
+    history.begin('Delete folder')
     const state = get()
     const sourcePrefix = `${folderPath}/`
     const affectedFiles = state.files.filter((file) => file.name.startsWith(sourcePrefix))
 
-    if (affectedFiles.length === 0) return false
+    if (affectedFiles.length === 0) { history.abort(); return false }
 
     const files = state.files.filter((file) => !file.name.startsWith(sourcePrefix))
-    if (files.length === 0) return false
+    if (files.length === 0) { history.abort(); return false }
 
     const affectedPaths = new Set(affectedFiles.map((f) => f.path))
 
@@ -1317,16 +1536,19 @@ export const useWorkspaceStore = create<WorkspaceState>()((set, get) => ({
       folders: nextFolders,
     })
 
+    void history.commit(get().sample.id)
     return true
   },
   moveFileToFolder: (path, folderName) => {
+    const history = useHistoryStore.getState()
+    history.begin('Move file')
     const state = get()
     const target = state.files.find((file) => file.path === path)
-    if (!target) return false
+    if (!target) { history.abort(); return false }
 
     const nextName = folderName ? `${folderName}/${baseName(target.name)}` : baseName(target.name)
-    if (nextName === target.name) return true
-    if (!isUniqueFileName(state.files, path, nextName)) return false
+    if (nextName === target.name) { history.abort(); return true }
+    if (!isUniqueFileName(state.files, path, nextName)) { history.abort(); return false }
 
     const nextState = renameWorkspaceFiles(state, new Map([[target.name, nextName]]))
 
@@ -1353,26 +1575,29 @@ export const useWorkspaceStore = create<WorkspaceState>()((set, get) => ({
       ...nextState,
       folders: Array.from(new Set([...nextState.folders, ...(folderName ? [folderName] : [])])),
     })
+    void history.commit(get().sample.id)
     return true
   },
   moveFolderToFolder: (folderName, destinationFolderName) => {
+    const history = useHistoryStore.getState()
+    history.begin('Move folder')
     const state = get()
     const sourcePrefix = `${folderName}/`
     const affected = state.files.filter((file) => file.name.startsWith(sourcePrefix))
-    if (affected.length === 0) return false
-    if (destinationFolderName === folderName) return true
-    if (destinationFolderName && destinationFolderName.startsWith(sourcePrefix)) return false
+    if (affected.length === 0) { history.abort(); return false }
+    if (destinationFolderName === folderName) { history.abort(); return true }
+    if (destinationFolderName && destinationFolderName.startsWith(sourcePrefix)) { history.abort(); return false }
 
     const movedFolderBase = baseName(folderName)
     const nextFolderName = destinationFolderName ? `${destinationFolderName}/${movedFolderBase}` : movedFolderBase
-    if (nextFolderName === folderName) return true
+    if (nextFolderName === folderName) { history.abort(); return true }
 
     const renameMap = new Map<string, string>()
     for (const file of affected) {
       const suffix = file.name.slice(sourcePrefix.length)
       renameMap.set(file.name, `${nextFolderName}/${suffix}`)
     }
-    if (!fileNamesAreUnique(state.files, renameMap)) return false
+    if (!fileNamesAreUnique(state.files, renameMap)) { history.abort(); return false }
 
     const nextState = renameWorkspaceFiles(state, renameMap)
 
@@ -1415,6 +1640,7 @@ export const useWorkspaceStore = create<WorkspaceState>()((set, get) => ({
         }),
       )),
     })
+    void history.commit(get().sample.id)
     return true
   },
   importExternalFiles: async (incomingFiles, pane = 'primary', folderName = null) => {
@@ -1440,7 +1666,7 @@ export const useWorkspaceStore = create<WorkspaceState>()((set, get) => ({
         return {
           path: toPath(state.sample.id, name),
           name,
-          language: languageFromFileName(name),
+          language: languageFromFileName(name) as StoredWorkspaceLanguage,
           content,
           updatedAt: importedAt,
         } satisfies WorkspaceFile
@@ -1702,31 +1928,67 @@ export const useWorkspaceStore = create<WorkspaceState>()((set, get) => ({
           return updated ? ({ ...file, content: updated.content } satisfies SampleFile) : file
         }),
       }
-      const nextState = { ...state, files, sample }
       const nextDirtyFilePaths = state.dirtyFilePaths.includes(path)
         ? state.dirtyFilePaths
         : [...state.dirtyFilePaths, path]
 
-      queueSave(currentSnapshot({ ...nextState, dirtyFilePaths: nextDirtyFilePaths, saveState: 'saving' }), () => {
-        const latest = get()
-        set({
-          dirtyFilePaths: latest.dirtyFilePaths.filter((entry) => entry !== path),
-          saveState: 'saved',
-        })
-
-        window.setTimeout(() => {
-          if (get().saveState === 'saved') {
-            set({ saveState: 'idle' })
-          }
-        }, 1200)
-      })
-
       return {
-        ...nextState,
+        files,
+        sample,
         dirtyFilePaths: nextDirtyFilePaths,
-        saveState: 'saving',
       }
     }),
+  saveFile: async (path: string, message?: string) => {
+    const state = get()
+    const file = state.files.find(f => f.path === path)
+    if (!file) return
+
+    if (file.name === '.browserver.yaml') {
+      try {
+        const config = parseBrowserYaml(file.content)
+        if (!config.theme || typeof config.layout?.sidebarWidth !== 'number') {
+          throw new Error('Invalid .browserver.yaml format')
+        }
+        
+        // Two-way sync: apply to other stores
+        useThemeStore.getState().applyThemeId(config.theme)
+        useLayoutStore.getState().applySnapshot(config.layout)
+        if (config.activePanel) set({ activePanel: config.activePanel as any })
+        if (config.activeBottomPanel) set({ activeBottomPanel: config.activeBottomPanel as any })
+        if (config.activeRightPanelTab) set({ activeRightPanelTab: config.activeRightPanelTab as any })
+        
+        set({ saveError: null })
+      } catch (e: any) {
+        set({ saveError: e.message })
+        window.alert(`Invalid .browserver.yaml: ${e.message}`)
+        return
+      }
+    }
+
+    set({ saveState: 'saving' })
+    const snapshot = currentSnapshot(get())
+    await saveWorkspaceSnapshot(snapshot)
+    
+    // Git commit for every save
+    try {
+      await commitWorkspace(state.sample.id, state.files.map(f => ({ path: f.path, content: f.content })), message || `Save ${file.name}`)
+    } catch (e) {
+      console.error('Git commit failed', e)
+    }
+    
+    set((s) => ({
+      dirtyFilePaths: s.dirtyFilePaths.filter((p) => p !== path),
+      saveState: 'saved',
+      saveError: null,
+    }))
+    
+    window.setTimeout(() => {
+      const latest = useWorkspaceStore.getState()
+      if (latest.saveState === 'saved') {
+        set({ saveState: 'idle' })
+      }
+    }, 1200)
+  },
 }))
 
 export function selectActiveFile(state: WorkspaceState): WorkspaceFile | null {

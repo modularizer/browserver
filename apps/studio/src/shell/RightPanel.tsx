@@ -1,9 +1,11 @@
+import { useState } from 'react'
 import { useCheckpointStore } from '../store/checkpoints'
 import { useDatabaseStore } from '../store/database'
-import { selectRuntimeIsStale, useRuntimeStore } from '../store/runtime'
+import { selectRuntimeIsStale, useRuntimeStore, type RuntimeRequestEntry } from '../store/runtime'
 import { useLayoutStore } from '../store/layout'
 import { useTrustStore } from '../store/trust'
 import { selectActiveFile, useWorkspaceStore, type EditorViewId } from '../store/workspace'
+import type { RuntimeOperation } from '../runtime/types'
 
 function formatTime(value: number | undefined) {
   if (!value) return 'n/a'
@@ -22,7 +24,7 @@ interface RightPanelProps {
 
 const rightPanelToViewId: Record<'inspector' | 'client' | 'trust', EditorViewId> = {
   inspector: 'inspect',
-  client: 'client',
+  client: 'api',
   trust: 'trust',
 }
 
@@ -176,7 +178,7 @@ export function RightPanel({ onStartTabDrag, onEndTabDrag }: RightPanelProps) {
                     <span className={activeRequest.ok ? 'text-bs-good' : 'text-bs-error'}>
                       {activeRequest.ok ? 'ok' : 'error'}
                     </span>
-                    <span className="text-bs-text">{activeRequest.operationId}</span>
+                    <span className="text-bs-text">{activeRequest.operationLabel ?? activeRequest.operationId}</span>
                     <span className="text-bs-text-faint">{activeRequest.durationMs}ms</span>
                   </div>
                   <div className="mt-2 text-bs-text-faint">input</div>
@@ -216,10 +218,9 @@ export function RightPanel({ onStartTabDrag, onEndTabDrag }: RightPanelProps) {
         ) : null}
 
         {activeRightPanelTab === 'client' ? (
-          <>
-            <Section title="Client Playground">
-              <div className="text-[10px] text-bs-text-faint">target url</div>
-              <div className="mt-1 flex items-center gap-2">
+          <div className="flex flex-col gap-6">
+            <Section title="Target">
+              <div className="flex items-center gap-2">
                 <input
                   value={clientTargetUrl}
                   onChange={(event) => setClientTargetUrl(event.target.value)}
@@ -227,66 +228,58 @@ export function RightPanel({ onStartTabDrag, onEndTabDrag }: RightPanelProps) {
                   spellCheck={false}
                   className="min-w-0 flex-1 rounded border border-bs-border bg-bs-bg-panel px-2 py-1 text-[11px] text-bs-text outline-none focus:border-bs-border-focus"
                 />
-                <button
-                  onClick={() => void runClientFile(activeFile?.path)}
-                  className="flex h-[30px] w-[30px] items-center justify-center rounded bg-bs-good text-bs-accent-text hover:opacity-90"
-                  aria-label="Run client"
-                  title="Run client"
-                >
-                  ▶
-                </button>
               </div>
-              <div className="mt-2 text-bs-text-muted">
-                active file: {activeFile?.name ?? 'none selected'}
-              </div>
-              {clientRun ? (
-                <div className="mt-2 rounded border border-bs-border bg-bs-bg-sidebar px-2 py-2">
-                  <div className="flex items-center gap-2">
-                    <span className="text-bs-text">{clientRun.status}</span>
-                    <span className="text-bs-text-faint">{clientRun.filePath}</span>
-                    <span className="text-bs-text-faint">{clientRun.targetUrl ?? connectionUrl ?? 'no target'}</span>
-                  </div>
-                  {clientRun.durationMs ? <div className="text-bs-text-faint">{clientRun.durationMs}ms</div> : null}
-                  {clientRun.error ? <div className="mt-1 text-bs-error">{clientRun.error}</div> : null}
-                  {typeof clientRun.result !== 'undefined' ? (
-                    <pre className="mt-2 overflow-auto whitespace-pre-wrap text-[10px] text-bs-text-muted">
-                      {JSON.stringify(clientRun.result, null, 2)}
-                    </pre>
-                  ) : null}
-                </div>
-              ) : (
-                <div className="mt-2 text-bs-text-muted">run a client file to inspect results here</div>
-              )}
             </Section>
 
-            <Section title="Operations">
-              <div className="flex flex-col gap-2">
-                {operations.length > 0 ? operations.map((operation) => (
-                  <div key={operation.id} className="rounded border border-bs-border bg-bs-bg-sidebar px-2 py-1">
-                    <div className="flex items-center gap-2">
-                      <span className="text-bs-text">{operation.id}</span>
-                      <span className="text-bs-text-faint">{operation.method}</span>
-                    </div>
-                    <div className="truncate text-bs-text-muted">{operation.path}</div>
-                    <textarea
-                      value={invocationDrafts[operation.id] ?? '{}'}
-                      onChange={(event) => setInvocationDraft(operation.id, event.target.value)}
-                      spellCheck={false}
-                      className="mt-1 h-24 w-full resize-y rounded border border-bs-border bg-bs-bg-panel px-2 py-1 font-mono text-[10px] text-bs-text outline-none focus:border-bs-border-focus"
+            <Section title="Methods">
+              <div className="flex flex-col">
+                {operations.length > 0 ? (
+                  operations.map((operation) => (
+                    <OperationItem
+                      key={operation.id}
+                      operation={operation}
+                      draft={invocationDrafts[operation.id] ?? '{}'}
+                      setDraft={(val) => setInvocationDraft(operation.id, val)}
+                      invoke={invokeOperation}
+                      latestRequest={requests.find((r) => r.operationId === operation.id) ?? null}
                     />
-                    <button
-                      onClick={() => void invokeOperation(operation.id)}
-                      className="mt-1 rounded bg-bs-bg-hover px-2 py-0.5 text-bs-text hover:bg-bs-bg-active"
-                    >
-                      invoke
-                    </button>
-                  </div>
-                )) : (
-                  <div className="text-bs-text-muted">launch the runtime to inspect and invoke client APIs</div>
+                  ))
+                ) : (
+                  <div className="text-bs-text-muted">Launch the runtime to see available methods</div>
                 )}
               </div>
             </Section>
-          </>
+
+            <Section title="Run Client File">
+              <div className="flex items-center gap-2">
+                <div className="flex-1 min-w-0">
+                  <div className="truncate text-bs-text font-medium">{activeFile?.name ?? 'No file selected'}</div>
+                  <div className="text-[10px] text-bs-text-faint">Executes the active file as a client</div>
+                </div>
+                <button
+                  onClick={() => void runClientFile(activeFile?.path)}
+                  className="flex h-7 px-3 items-center justify-center rounded bg-bs-bg-hover text-bs-text hover:bg-bs-bg-active text-[11px]"
+                >
+                  Run
+                </button>
+              </div>
+              {clientRun && (
+                <div className="mt-2 rounded border border-bs-border bg-bs-bg-sidebar px-2 py-2">
+                  <div className="flex items-center gap-2">
+                    <div className={`h-1.5 w-1.5 rounded-full ${clientRun.status === 'success' ? 'bg-bs-good' : clientRun.status === 'error' ? 'bg-bs-error' : 'bg-bs-text-faint'}`} />
+                    <span className="text-bs-text font-medium uppercase text-[9px]">{clientRun.status}</span>
+                    <span className="text-bs-text-faint ml-auto">{clientRun.durationMs}ms</span>
+                  </div>
+                  {clientRun.error && <div className="mt-1 text-bs-error text-[10px]">{clientRun.error}</div>}
+                  {typeof clientRun.result !== 'undefined' && (
+                    <pre className="mt-2 overflow-auto whitespace-pre-wrap text-[10px] text-bs-text-muted max-h-32 border-t border-bs-border pt-2">
+                      {JSON.stringify(clientRun.result, null, 2)}
+                    </pre>
+                  )}
+                </div>
+              )}
+            </Section>
+          </div>
         ) : null}
 
         {activeRightPanelTab === 'trust' ? (
@@ -333,6 +326,163 @@ function Section({ title, children }: { title: string; children: React.ReactNode
     <div>
       <div className="mb-1 uppercase tracking-[0.16em] text-bs-text-faint">{title}</div>
       {children}
+    </div>
+  )
+}
+
+function OperationItem({
+  operation,
+  draft,
+  setDraft,
+  invoke,
+  latestRequest,
+}: {
+  operation: RuntimeOperation
+  draft: string
+  setDraft: (value: string) => void
+  invoke: (id: string) => Promise<void>
+  latestRequest: RuntimeRequestEntry | null
+}) {
+  const [isExpanded, setIsExpanded] = useState(false)
+
+  return (
+    <div className="border-b border-bs-border last:border-0">
+      <div
+        className="flex items-center gap-2 py-2 cursor-pointer hover:bg-bs-bg-hover px-1 -mx-1 rounded"
+        onClick={() => setIsExpanded(!isExpanded)}
+      >
+        <span className={`text-[9px] text-bs-text-faint transition-transform duration-100 ${isExpanded ? 'rotate-90' : ''}`}>
+          ▶
+        </span>
+        <span className="font-mono text-bs-text flex-1 truncate">
+          {operation.label}
+        </span>
+        {latestRequest && (
+          <div className={`h-1.5 w-1.5 rounded-full ${latestRequest.ok ? 'bg-bs-good' : 'bg-bs-error'}`} title={latestRequest.ok ? 'Success' : 'Error'} />
+        )}
+      </div>
+
+      {isExpanded && (
+        <div className="pb-3 pl-4 flex flex-col gap-3">
+          {operation.summary && (
+            <div className="text-bs-text-muted leading-relaxed">{operation.summary}</div>
+          )}
+
+          <OperationForm
+            operation={operation}
+            value={draft}
+            onChange={setDraft}
+          />
+
+          <div className="flex items-center gap-2">
+            <button
+              onClick={(e) => {
+                e.stopPropagation()
+                void invoke(operation.id)
+              }}
+              className="bg-bs-good text-bs-accent-text px-3 py-1 rounded text-[11px] font-medium hover:opacity-90"
+            >
+              Run
+            </button>
+            {latestRequest && (
+              <span className="text-[10px] text-bs-text-faint">
+                {latestRequest.durationMs}ms
+              </span>
+            )}
+          </div>
+
+          {latestRequest && (
+            <div className="bg-bs-bg-sidebar rounded border border-bs-border overflow-hidden">
+               <div className="bg-bs-bg-hover px-2 py-1 text-[9px] text-bs-text-faint border-b border-bs-border flex justify-between">
+                 <span>Result</span>
+                 <span>{new Date(latestRequest.endedAt).toLocaleTimeString()}</span>
+               </div>
+               <pre className="p-2 text-[10px] text-bs-text-muted overflow-auto max-h-40 whitespace-pre-wrap">
+                 {JSON.stringify(latestRequest.ok ? latestRequest.result : latestRequest.error, null, 2)}
+               </pre>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function OperationForm({
+  operation,
+  value,
+  onChange,
+}: {
+  operation: RuntimeOperation
+  value: string
+  onChange: (value: string) => void
+}) {
+  const schema = operation.inputSchema
+  const properties = schema?.properties as Record<string, any> | undefined
+
+  if (!properties || Object.keys(properties).length === 0) {
+    return null
+  }
+
+  let json: any = {}
+  try {
+    json = JSON.parse(value)
+  } catch (e) {
+    return (
+      <textarea
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        spellCheck={false}
+        className="h-24 w-full resize-y rounded border border-bs-border bg-bs-bg-panel px-2 py-1 font-mono text-[10px] text-bs-text outline-none focus:border-bs-border-focus"
+      />
+    )
+  }
+
+  return (
+    <div className="flex flex-col gap-3">
+      {Object.entries(properties).map(([key, propSchema]) => {
+        const val = json[key]
+        const update = (newVal: any) => {
+          onChange(JSON.stringify({ ...json, [key]: newVal }, null, 2))
+        }
+
+        return (
+          <div key={key} className="flex flex-col gap-1">
+            <div className="flex items-center justify-between gap-2">
+              <label className="text-[10px] text-bs-text font-medium truncate">{key}</label>
+              <span className="text-[9px] text-bs-text-faint uppercase">{propSchema.type}</span>
+            </div>
+            {propSchema.type === 'boolean' ? (
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={!!val}
+                  onChange={e => update(e.target.checked)}
+                  className="w-3.5 h-3.5 rounded border-bs-border bg-bs-bg-panel accent-bs-good"
+                />
+                <span className="text-[10px] text-bs-text-muted">{!!val ? 'true' : 'false'}</span>
+              </label>
+            ) : propSchema.type === 'number' || propSchema.type === 'integer' ? (
+              <input
+                type="number"
+                value={val ?? ''}
+                onChange={e => update(e.target.value === '' ? undefined : Number(e.target.value))}
+                className="w-full rounded border border-bs-border bg-bs-bg-panel px-2 py-1 text-[11px] text-bs-text outline-none focus:border-bs-border-focus"
+              />
+            ) : (
+              <input
+                type="text"
+                value={typeof val === 'string' ? val : (val === undefined ? '' : JSON.stringify(val))}
+                onChange={e => update(e.target.value)}
+                className="w-full rounded border border-bs-border bg-bs-bg-panel px-2 py-1 text-[11px] text-bs-text outline-none focus:border-bs-border-focus"
+              />
+            )}
+            {propSchema.description && (
+              <div className="text-[9px] text-bs-text-faint italic">{propSchema.description}</div>
+            )}
+          </div>
+        )
+      })}
     </div>
   )
 }

@@ -175,9 +175,7 @@ export function BottomPanel({ onCreateCheckpoint, collapsed = false, onRestore, 
               >
                 <div className="flex items-center gap-2">
                   <span className={request.ok ? 'text-bs-good' : 'text-bs-error'}>{request.ok ? 'ok' : 'error'}</span>
-                  <span className="text-bs-text">{request.operationId}</span>
-                  <span className="text-bs-text-faint">{request.method}</span>
-                  <span className="truncate text-bs-text-muted">{request.path}</span>
+                  <span className="text-bs-text">{request.operationLabel ?? request.operationId}</span>
                   <span className="text-bs-text-faint">{request.durationMs}ms</span>
                 </div>
               </button>

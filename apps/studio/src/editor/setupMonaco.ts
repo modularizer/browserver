@@ -24,20 +24,31 @@ declare module '@modularizer/plat/client-server' {
     [key: string]: any
   }
 
-  export function serveClientSideServer(
-    serverName: string,
-    controllers: ControllerClass[],
-  ): ClientSideServerDefinition
+   export function serveClientSideServer(
+     serverName: string,
+     controllers: ControllerClass[],
+   ): ClientSideServerDefinition
 
-  export function startClientSideServerFromSource(options: {
-    source: string
-    serverName?: string
-    transpile?: (source: string) => string | Promise<string>
-    onRequest?: (direction: 'request' | 'response', payload: unknown) => void
-  }): Promise<StartedClientSideServer>
-}
+   export function startClientSideServerFromSource(options: {
+     source: string | Record<string, string>
+     serverName?: string
+     sourceEntryPoint?: string
+     transpile?: (source: string | Record<string, string>, entryPoint?: string) => string | Promise<string>
+     onRequest?: (direction: 'request' | 'response', payload: unknown) => void
+   }): Promise<StartedClientSideServer>
+   
+   export function runClientSideServer(
+     source: string,
+     options?: { serverName?: string; undecoratedMode?: 'GET' | 'POST' | 'private' }
+   ): Promise<StartedClientSideServer>
+   
+   export function runClientSideServer(
+     source: Record<string, string>,
+     options?: { serverName?: string; undecoratedMode?: 'GET' | 'POST' | 'private'; sourceEntryPoint?: string }
+   ): Promise<StartedClientSideServer>
+ }
 
-declare module '@modularizer/plat-client/client-server' {
+ declare module '@modularizer/plat-client/client-server' {
   export type ControllerClass = new () => any
 
   export interface ClientSideServerDefinition {
@@ -58,20 +69,31 @@ declare module '@modularizer/plat-client/client-server' {
     [key: string]: any
   }
 
-  export function serveClientSideServer(
-    serverName: string,
-    controllers: ControllerClass[],
-  ): ClientSideServerDefinition
+   export function serveClientSideServer(
+     serverName: string,
+     controllers: ControllerClass[],
+   ): ClientSideServerDefinition
 
-  export function startClientSideServerFromSource(options: {
-    source: string
-    serverName?: string
-    transpile?: (source: string) => string | Promise<string>
-    onRequest?: (direction: 'request' | 'response', payload: unknown) => void
-  }): Promise<StartedClientSideServer>
-}
+   export function startClientSideServerFromSource(options: {
+     source: string | Record<string, string>
+     serverName?: string
+     sourceEntryPoint?: string
+     transpile?: (source: string | Record<string, string>, entryPoint?: string) => string | Promise<string>
+     onRequest?: (direction: 'request' | 'response', payload: unknown) => void
+   }): Promise<StartedClientSideServer>
+   
+   export function runClientSideServer(
+     source: string,
+     options?: { serverName?: string; undecoratedMode?: 'GET' | 'POST' | 'private' }
+   ): Promise<StartedClientSideServer>
+   
+   export function runClientSideServer(
+     source: Record<string, string>,
+     options?: { serverName?: string; undecoratedMode?: 'GET' | 'POST' | 'private'; sourceEntryPoint?: string }
+   ): Promise<StartedClientSideServer>
+ }
 
-declare module '@modularizer/plat-client' {
+ declare module '@modularizer/plat-client' {
   export class OpenAPIClient {
     constructor(openapi: Record<string, any>, options: { baseUrl: string })
     [key: string]: any

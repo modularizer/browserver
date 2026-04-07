@@ -1,11 +1,16 @@
 import { create } from 'zustand'
+import { connectClientSideServer } from '@modularizer/plat-client/client-server'
+import type { OpenAPIClient } from '@modularizer/plat-client/client-server'
 import {
-  buildSampleInput,
   startLocalTsRuntime,
 } from '../runtime/localTsRuntime'
 import { runClientSource } from '../runtime/clientRunner'
 import { startPythonRuntime } from '../runtime/pythonRuntime'
+import { normalizeClientApiBaseUrl, normalizeCssTargetUrl } from '../runtime/clientTargetUrl'
+import { extractOperationsFromOpenApi } from '../runtime/openapiOperations'
+import { invokeOpenApiClientOperation } from '../runtime/openapiInvoke'
 import type {
+  RuntimeAnalysisSummary,
   LocalRuntimeHandle,
   RuntimeDiagnostic,
   RuntimeOperation,
@@ -24,6 +29,8 @@ export interface RuntimeLogEntry {
 export interface RuntimeRequestEntry {
   id: string
   operationId: string
+  /** Same as matching RuntimeOperation.label when known. */
+  operationLabel?: string
   method: string
   path: string
   input: Record<string, unknown>
@@ -76,11 +83,11 @@ interface RuntimeState {
   launchedServerUpdatedAt: number | null
   connectionUrl: string | null
   serverName: string | null
+  diagnostics: RuntimeDiagnostic[]
+  compiledCode: string
+  analysisSummary: RuntimeAnalysisSummary[]
   openapiDocument: Record<string, unknown> | null
   operations: RuntimeOperation[]
-  diagnostics: RuntimeDiagnostic[]
-  compiledCode: string | null
-  analysisSummary: Array<{ controller: string; methods: string[] }>
   invocationDrafts: Record<string, string>
   logs: RuntimeLogEntry[]
   requests: RuntimeRequestEntry[]
@@ -103,6 +110,7 @@ interface RuntimeState {
   selectRequest: (requestId: string | null) => void
   clearRuntimeHistory: () => void
   clearClientRun: () => void
+  fetchOperations: (url: string) => Promise<void>
 }
 
 const runtimeHandles: Partial<Record<EditorPaneId, LocalRuntimeHandle | null>> = {
@@ -110,6 +118,10 @@ const runtimeHandles: Partial<Record<EditorPaneId, LocalRuntimeHandle | null>> =
   secondary: null,
   tertiary: null,
 }
+
+/** Active plat CSS (MQTT/WebRTC) client for the playground target; not used for HTTP APIs. */
+let cssPlaygroundClient: { baseUrl: string; client: OpenAPIClient } | null = null
+
 let highlightTimer: number | null = null
 const RECENT_CLIENT_TARGETS_KEY = 'browserver:recent-client-targets'
 
@@ -254,6 +266,19 @@ function updatePaneSession(
   }
 }
 
+function findRuntimeHandleForTarget(targetUrl: string): LocalRuntimeHandle | null {
+  const normalized = targetUrl.trim()
+  const panes: EditorPaneId[] = ['primary', 'secondary', 'tertiary']
+  for (const pane of panes) {
+    const handle = runtimeHandles[pane]
+    if (!handle) continue
+    if (normalized === handle.connectionUrl || normalized === `css://${handle.serverName}`) {
+      return handle
+    }
+  }
+  return null
+}
+
 export const useRuntimeStore = create<RuntimeState>()((set, get) => ({
   activeRuntimePane: 'primary',
   paneSessions: {
@@ -269,11 +294,11 @@ export const useRuntimeStore = create<RuntimeState>()((set, get) => ({
   launchedServerUpdatedAt: null,
   connectionUrl: null,
   serverName: null,
+  diagnostics: [],
+  compiledCode: '',
+  analysisSummary: [],
   openapiDocument: null,
   operations: [],
-  diagnostics: [],
-  compiledCode: null,
-  analysisSummary: [],
   invocationDrafts: {},
   logs: [],
   requests: [],
@@ -339,6 +364,7 @@ export const useRuntimeStore = create<RuntimeState>()((set, get) => ({
               serverName: `${workspace.sample.id}-${pane}`,
             })
         runtimeHandles[pane] = handle
+        cssPlaygroundClient = null
 
         updatePaneSession(set, get, pane, {
           mode: 'server',
@@ -363,27 +389,7 @@ export const useRuntimeStore = create<RuntimeState>()((set, get) => ({
           launchedServerUpdatedAt: targetFile.updatedAt,
           connectionUrl: handle.connectionUrl,
           serverName: handle.serverName,
-          openapiDocument: handle.openapi,
-          operations: handle.operations,
-          diagnostics: handle.diagnostics,
-          compiledCode: handle.compiledCode,
-          analysisSummary: handle.analysisSummary,
-          invocationDrafts: Object.fromEntries(
-            handle.operations.map((operation) => [
-              operation.id,
-              JSON.stringify(buildSampleInput(operation.inputSchema), null, 2),
-            ]),
-          ),
-          clientRun: null,
-          errorMessage: null,
           logs: [
-            ...handle.diagnostics.map((diagnostic) =>
-              logEntry(
-                diagnostic.category === 'error' ? 'error' : 'info',
-                `${handle.language.toUpperCase()}${diagnostic.code}: ${diagnostic.message}`,
-                diagnostic,
-              ),
-            ),
             logEntry(
               'info',
               handle.launchable
@@ -395,6 +401,11 @@ export const useRuntimeStore = create<RuntimeState>()((set, get) => ({
           ],
         })
       } catch (error) {
+        console.error('Runtime startup error details:', error)
+        console.error('Error type:', typeof error)
+        console.error('Error constructor:', error?.constructor?.name)
+        console.error('Error message:', (error as any)?.message)
+        console.error('Error stack:', (error as any)?.stack)
         runtimeHandles[pane] = null
         updatePaneSession(set, get, pane, {
           mode: 'server',
@@ -406,7 +417,7 @@ export const useRuntimeStore = create<RuntimeState>()((set, get) => ({
           launchedFileUpdatedAt: null,
           connectionUrl: null,
           serverName: null,
-          errorMessage: error instanceof Error ? error.message : 'Unknown runtime startup error',
+          errorMessage: error instanceof Error ? error.message : String(error),
         })
         set({
           activeRuntimePane: pane,
@@ -418,16 +429,14 @@ export const useRuntimeStore = create<RuntimeState>()((set, get) => ({
           launchedServerUpdatedAt: null,
           connectionUrl: null,
           serverName: null,
+          diagnostics: [],
+          compiledCode: '',
+          analysisSummary: [],
           openapiDocument: null,
           operations: [],
-          diagnostics: [],
-          compiledCode: null,
-          analysisSummary: [],
           invocationDrafts: {},
-          clientRun: null,
-          errorMessage: error instanceof Error ? error.message : 'Unknown runtime startup error',
           logs: [
-            logEntry('error', `Runtime failed to start in ${pane}`, error instanceof Error ? error.message : error),
+            logEntry('error', `Runtime failed to start in ${pane}`, error instanceof Error ? error.message : String(error)),
             ...get().logs,
           ],
         })
@@ -483,7 +492,6 @@ export const useRuntimeStore = create<RuntimeState>()((set, get) => ({
       const targetUrl = getDefaultClientTarget(get())
       const result = await runClientSource({
         source: targetFile.content,
-        runtime: availableHandle,
         targetUrl,
       })
       const endedAt = Date.now()
@@ -504,7 +512,6 @@ export const useRuntimeStore = create<RuntimeState>()((set, get) => ({
           status: 'success',
           logs: result.logs,
           result: result.result,
-          compiledCode: result.compiledCode,
           startedAt,
           endedAt,
           durationMs: endedAt - startedAt,
@@ -558,12 +565,14 @@ export const useRuntimeStore = create<RuntimeState>()((set, get) => ({
         launchedServerUpdatedAt: null,
         connectionUrl: null,
         serverName: null,
+        diagnostics: [],
+        compiledCode: '',
+        analysisSummary: [],
         openapiDocument: null,
         operations: [],
-        diagnostics: [],
-        compiledCode: null,
-        analysisSummary: [],
         invocationDrafts: {},
+        logs: [],
+        requests: [],
         highlightedHandler: null,
         activeRequestId: null,
         clientRun: null,
@@ -590,43 +599,10 @@ export const useRuntimeStore = create<RuntimeState>()((set, get) => ({
     await get().stopPane(useWorkspaceStore.getState().activeEditorPane)
   },
   invokeOperation: async (operationId: string) => {
-    const pane = get().activeRuntimePane
-    const runtimeHandle = runtimeHandles[pane] ?? null
-
-    if (!runtimeHandle) {
-      set({
-        logs: [
-          logEntry('error', 'Cannot invoke operation before runtime starts'),
-          ...get().logs,
-        ],
-      })
-      return
-    }
-
-    if (!runtimeHandle.launchable) {
-      set({
-        logs: [
-          logEntry('error', runtimeHandle.launchNote ?? 'Runtime is not launchable yet'),
-          ...get().logs,
-        ],
-      })
-      return
-    }
-
-    if (isRuntimeStale(get())) {
-      set({
-        logs: [
-          logEntry('error', 'Runtime is stale. Restart it to run the latest server source.'),
-          ...get().logs,
-        ],
-      })
-      return
-    }
-
-    const operation = runtimeHandle.operations.find((entry) => entry.id === operationId)
+    const operation = get().operations.find((entry) => entry.id === operationId)
     if (!operation) return
 
-    const draft = get().invocationDrafts[operationId] ?? JSON.stringify(buildSampleInput(operation.inputSchema), null, 2)
+    const draft = get().invocationDrafts[operationId] ?? '{}'
     let input: Record<string, unknown>
 
     try {
@@ -646,55 +622,124 @@ export const useRuntimeStore = create<RuntimeState>()((set, get) => ({
     }
 
     const startedAt = Date.now()
+    const targetUrl = get().clientTargetUrl || get().connectionUrl
+
+    if (!targetUrl) {
+      set({ logs: [logEntry('error', 'No target URL for invocation'), ...get().logs] })
+      return
+    }
 
     set({
       activeRequestId: null,
       logs: [
-        logEntry('info', `Invoking ${operation.method} ${operation.path}`, input),
+        logEntry('info', `Invoking ${operation.label} at ${targetUrl}`, input),
         ...get().logs,
       ],
     })
     setHighlightedHandler(set, operation.id)
 
     try {
-      const result = await runtimeHandle.invoke(operationId, input)
+      const trimmedTarget = targetUrl.trim()
+
+      if (trimmedTarget.startsWith('css://')) {
+        if (
+          !cssPlaygroundClient
+          || normalizeCssTargetUrl(cssPlaygroundClient.baseUrl) !== normalizeCssTargetUrl(trimmedTarget)
+        ) {
+          await get().fetchOperations(trimmedTarget)
+        }
+        const cssClient = cssPlaygroundClient?.client
+        if (cssClient) {
+          const data = await invokeOpenApiClientOperation(cssClient, operation, input)
+          const endedAt = Date.now()
+          const entry: RuntimeRequestEntry = {
+            id: crypto.randomUUID(),
+            operationId,
+            operationLabel: operation.label,
+            method: operation.method,
+            path: operation.path,
+            input,
+            ok: true,
+            result: data,
+            events: [],
+            startedAt,
+            endedAt,
+            durationMs: endedAt - startedAt,
+            timeline: [],
+          }
+          set({
+            activeRequestId: entry.id,
+            requests: [entry, ...get().requests].slice(0, 50),
+            logs: [
+              logEntry('info', `Completed ${entry.operationLabel ?? entry.operationId}`, entry.result),
+              ...get().logs,
+            ].slice(0, 200),
+          })
+          return
+        }
+      }
+
+      let base = normalizeClientApiBaseUrl(trimmedTarget)
+      if (base.startsWith('css://')) {
+        throw new Error('No connection for this target — use Connect or start a local server')
+      }
+
+      const url = new URL(operation.path, `${base}/`)
+      const response = await fetch(url.toString(), {
+        method: operation.method,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(input),
+      })
+      const result = await response.json()
       const endedAt = Date.now()
       const entry: RuntimeRequestEntry = {
-        id: result.requestId,
+        id: crypto.randomUUID(),
         operationId,
-        method: result.method,
-        path: result.path,
-        input: result.input,
-        ok: result.ok,
-        result: result.result,
-        error: result.error,
-        events: result.events,
+        operationLabel: operation.label,
+        method: operation.method,
+        path: operation.path,
+        input,
+        ok: response.ok,
+        result: response.ok ? result : undefined,
+        error: !response.ok ? { status: response.status, message: result.error || response.statusText } : undefined,
+        events: [],
         startedAt,
         endedAt,
         durationMs: endedAt - startedAt,
-        timeline: result.timeline,
+        timeline: [],
       }
-
       set({
         activeRequestId: entry.id,
         requests: [entry, ...get().requests].slice(0, 50),
         logs: [
-          logEntry(
-            entry.ok ? 'info' : 'error',
-            entry.ok ? `Completed ${entry.operationId}` : `Failed ${entry.operationId}`,
-            entry.ok ? entry.result : entry.error,
-          ),
-          ...entry.timeline
-            .filter((timelineEntry) => timelineEntry.stage === 'event')
-            .map((timelineEntry) => logEntry('event', formatTimelineStage(timelineEntry), timelineEntry.detail)),
+          logEntry(entry.ok ? 'info' : 'error', `${entry.ok ? 'Completed' : 'Failed'} ${entry.operationLabel ?? entry.operationId}`, entry.ok ? entry.result : entry.error),
           ...get().logs,
         ].slice(0, 200),
       })
-      useWorkspaceStore.getState().setActiveBottomPanel('calls')
     } catch (error) {
+      const endedAt = Date.now()
+      const errorMessage = error instanceof Error ? error.message : String(error)
+      const entry: RuntimeRequestEntry = {
+        id: crypto.randomUUID(),
+        operationId,
+        operationLabel: operation.label,
+        method: operation.method,
+        path: operation.path,
+        input,
+        ok: false,
+        result: undefined,
+        error: { message: errorMessage },
+        events: [],
+        startedAt,
+        endedAt,
+        durationMs: endedAt - startedAt,
+        timeline: [],
+      }
       set({
+        activeRequestId: entry.id,
+        requests: [entry, ...get().requests].slice(0, 50),
         logs: [
-          logEntry('error', `Invocation failed for ${operationId}`, error instanceof Error ? error.message : error),
+          logEntry('error', `Invocation failed for ${operationId}`, errorMessage),
           ...get().logs,
         ],
       })
@@ -751,13 +796,14 @@ export const useRuntimeStore = create<RuntimeState>()((set, get) => ({
     await get().runPane(useWorkspaceStore.getState().activeEditorPane)
   },
   setClientTargetUrl: (url) => set({ clientTargetUrl: url }),
-  setInvocationDraft: (operationId, draft) =>
-    set((state) => ({
+  setInvocationDraft: (operationId, draft) => {
+    set({
       invocationDrafts: {
-        ...state.invocationDrafts,
+        ...get().invocationDrafts,
         [operationId]: draft,
       },
-    })),
+    })
+  },
   selectRequest: (requestId) => {
     const request = requestId ? get().requests.find((entry) => entry.id === requestId) ?? null : null
     set({ activeRequestId: requestId })
@@ -765,4 +811,59 @@ export const useRuntimeStore = create<RuntimeState>()((set, get) => ({
   },
   clearRuntimeHistory: () => set({ logs: [], requests: [], activeRequestId: null }),
   clearClientRun: () => set({ clientRun: null }),
+  fetchOperations: async (url: string) => {
+    if (!url) return
+
+    const trimmed = url.trim()
+    cssPlaygroundClient = null
+
+    if (trimmed.startsWith('css://')) {
+      try {
+        const { client, openapi } = await connectClientSideServer({ baseUrl: trimmed })
+        cssPlaygroundClient = { baseUrl: normalizeCssTargetUrl(trimmed), client }
+        const spec = openapi as Record<string, any>
+        const operations = extractOperationsFromOpenApi(spec)
+        const invocationDrafts = Object.fromEntries(
+          operations.map((operation) => [operation.id, get().invocationDrafts[operation.id] ?? '{}'] as const),
+        )
+        set({
+          openapiDocument: spec as Record<string, unknown>,
+          operations,
+          invocationDrafts,
+        })
+        return
+      } catch (error) {
+        throw new Error(
+          error instanceof Error ? error.message : 'Failed to connect to client-side server (css://)',
+        )
+      }
+    }
+
+    let base = normalizeClientApiBaseUrl(trimmed)
+
+    const openapiUrls = [`${base}/openapi.json`, `${base}/openapi.yaml`, `${base}/openapi`]
+
+    for (const openapiUrl of openapiUrls) {
+      try {
+        const response = await fetch(openapiUrl)
+        if (!response.ok) continue
+        const openapi = await response.json()
+        const operations = extractOperationsFromOpenApi(openapi)
+        const invocationDrafts = Object.fromEntries(
+          operations.map((operation) => [operation.id, get().invocationDrafts[operation.id] ?? '{}'] as const),
+        )
+        set({
+          openapiDocument: openapi,
+          operations,
+          invocationDrafts,
+        })
+        return
+      } catch {
+        continue
+      }
+    }
+
+
+    throw new Error(`Failed to fetch OpenAPI from ${trimmed}`)
+  },
 }))

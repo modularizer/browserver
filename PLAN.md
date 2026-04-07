@@ -1044,6 +1044,223 @@ We should consider the project on track when:
 - the layout comfortably shows many useful panels at once without feeling bloated
 - the interface feels concise and reactive instead of form-heavy
 
+## Version History (Undo/Redo) Plan
+
+Goal
+- Provide reliable, fast, local-first undo/redo across code edits and IDE actions with Ctrl+Z / Ctrl+Y (Cmd+Z / Shift+Cmd+Z on macOS).
+- Support Git-like versioning for files and optionally true Git in the browser, while also tracking UI actions (panel sizes, tab moves, pane splits), workspace actions (file/folder create/rename/move/upload/delete), theme toggles, and settings.
+- Keep deletions reversible with a short grace window and a light-weight Trash model.
+
+Constraints
+- 100% static-site, browser-only. No backend.
+- Local-first persistence with durability across reloads (IndexedDB primary; LocalStorage only for tiny pointers)
+- Must not degrade Monaco typing latency or UI responsiveness.
+
+High-level approach
+- Event-sourced History: every user-visible change is an event with metadata and an inverse patch. Undo pops the last committed transaction and applies its inverse; redo reapplies.
+- Transactions: logically related events are grouped so they undo/redo atomically (e.g., a file rename that re-targets open tabs and pane assignments).
+- Coalescing: rapid sequences (typing bursts, continuous panel resizing) are merged to reduce noise and improve performance.
+- Optional Git Checkpoints: periodically synthesize Git commits using isomorphic-git in the browser. Commits are durable checkpoints; events between commits are local history.
+
+Scope of tracked changes (event kinds)
+1) Text and binary file content
+   - text-edit: character-level patches sourced from Monaco (range + text), coalesced while cursor remains in same line block and within time window (e.g., 1–2s).
+   - file-replace: whole-content replacement for paste/import or format-on-save.
+   - binary-blob-replace: store as Blob refs in IndexedDB; diff suppressed, size-capped.
+2) File and folder tree operations
+   - file-create, file-rename, file-move, file-delete (soft-delete w/ Trash), file-upload
+   - folder-create, folder-rename, folder-move, folder-delete (recursive; soft-delete)
+   - All include inverse operations and update of open tabs, active file, pane assignments, dirty flags, and view titles.
+3) Workbench layout and tab/pane actions
+   - panel-resize (sidebar, right panel, bottom panel heights), panel-toggle
+   - tab-open/close/reorder, tab-move-between-panes, pane-split/close, focus changes when meaningful
+   - right-panel tab switches if they change persistent session state
+4) Settings and theme
+   - theme-toggle (dark/light/system), font size, tab sizing, editor options (wrapping, minimap, rulers)
+   - settings-change events are small and coalesced per key.
+5) Runtime inspector views
+   - Opening/closing history/logs/clients as editor views is tracked so UI can be restored via undo/redo when appropriate (non-destructive, reversible).
+
+Data model (IndexedDB)
+- Stores
+  - workspaces: metadata per workspace (id, createdAt, current Git head ref if enabled)
+  - blobs: file contents (chunks or full), addressed by contentHash
+  - events: append-only event log per workspace
+  - transactions: boundaries and indexes for undo/redo navigation
+  - snapshots: optional periodic file tree snapshots for fast restore and compaction
+  - trash: soft-deleted entries with expiry timestamps
+- Event record
+  - id, workspaceId, ts, actor (local), kind, payload (normalized), inverse (payload to revert), domain (files|folders|layout|tabs|settings|view), coalesceKey?, groupKey?
+- Transaction record
+  - id, tsStart, tsEnd, eventIds[], label (human-friendly), domains[], summary
+
+Undo/Redo engine
+- Pointer model with a single transaction index per workspace session. Undo steps the pointer back and applies all inverse patches in the transaction; redo moves it forward and reapplies.
+- Cross-domain dispatcher applies patches by delegating to domain providers:
+  - files provider (wraps workspace store ops: create/rename/move/delete, content updates)
+  - layout provider (panel sizes, visibility, splits)
+  - tabs provider (open/close/move/reorder, active path)
+  - settings provider (theme, editor options)
+- Providers must be idempotent and deterministic; each op returns an inverse patch used to finalize the transaction record.
+- Transaction boundaries
+  - beginTransaction(label, domains)
+  - record(event) coalesces within active tx as needed
+  - commitTransaction() freezes inverse
+  - abortTransaction() applies accumulated inverse if thrown
+- Coalescing rules
+  - text-edit: merge while same file and caret is adjacent; timeout ~1000ms
+  - panel-resize: throttle to 50–100ms and squash within 500ms window
+  - settings: per-key squash within 1s
+- Guardrails
+  - Don’t record events during undo/redo re-application; mark reentrant flag.
+  - Skip no-op diffs; cap payload sizes; fall back to file-replace for massive edits.
+
+Git-like integration (optional)
+- Use isomorphic-git + lightning-fs (or idb-fs) to host a per-workspace repo in IndexedDB.
+- Map current working tree from WorkspaceStore into a virtual FS for commits.
+- Strategies
+  - Auto-commit on explicit Save All or on idle (e.g., 30s after last edit) with a synthesized message from last N transactions.
+  - Manual Commit from the History panel with diff preview; author from local identity.
+- Bridging with events
+  - A commit records the file tree state; transaction ids since last commit are stored in the commit message footer for traceability.
+  - Restore from commit replaces file contents; UI/layout history remains separate but can be reset optionally.
+- Export/Import
+  - Export repo as .zip or packfiles for sharing.
+  - Import initializes both Git repo and event log; event log may start fresh or be reconstructed from commit deltas.
+
+Deletions and Trash model
+- file-delete and folder-delete move entries to Trash store with: name/path, parent, contents (blob refs or snapshot), deletedAt.
+- Grace window policy: default 10 minutes; surfaced in UI with Restore button.
+- Hard-delete occurs when: grace window elapses, Trash is emptied, or storage pressure triggers compaction.
+- Undo within grace window restores from Trash seamlessly; beyond window, Undo warns and attempts best-effort restore if blobs remain.
+
+Persistence details
+- Primary: IndexedDB via a small storage module already used by workspace; extend with history DB and schema versioning.
+- Secondary: LocalStorage holds the current transaction pointer and a small index for quick boot.
+- Compaction
+  - Periodically take a snapshot of the file tree (every N KB or M minutes) and truncate events before the snapshot if not needed for redo beyond the last commit.
+  - Blob deduplication by contentHash across files and snapshots.
+- Limits & quotas
+  - Soft cap per workspace (e.g., 200 MB), with UI prompts to prune or export.
+
+UX surfaces
+- Shortcuts: Ctrl+Z / Ctrl+Y (Windows/Linux), Cmd+Z / Shift+Cmd+Z (macOS); visible in tooltips and command palette.
+- History panel (new bottom tab) with three views:
+  1) Timeline: transaction list with domains, summaries, and quick undo/redo jump.
+  2) Per-file history: select a file to see a diffable timeline, restore specific versions.
+  3) Checkpoints: Git commits (if enabled) with diff preview and revert/cherry-pick.
+- Inline affordances
+  - “Restored from Trash” banners when undoing deletes
+  - Status bar segment showing last action and available redo levels
+  - Context menus: “Undo Rename”, “Revert File”, “Restore Deleted …”
+
+APIs and integration points
+- history.begin(label?, domains?) / history.commit() / history.abort()
+- history.record(kind, payload, provider) returns inverse payload
+- history.undo() / history.redo() / history.jumpTo(transactionId)
+- Providers
+  - filesProvider: wraps useWorkspaceStore mutations (updateFileContent, create/rename/move/delete, moveFolderToFolder, etc.)
+  - layoutProvider: wraps useLayoutStore mutations (toggleSidebar, set sizes, splits)
+  - tabsProvider: wraps pane/tab mutations (assignFileToPane, splitFileToPane, reorderOpenFile, closeFile/closePaths)
+  - settingsProvider: wraps theme + editor option setters
+- Monaco integration
+  - Use editor.onDidChangeModelContent to create coalesced text-edit events
+  - Capture cursor and selection for better merge heuristics (optional)
+
+Edge cases and policies
+- Renames with open tabs: update paneTabs consistently and preserve dirty state; inverse must restore exact tab and focus
+- Moves into/within folders: ensure unique name validation both forward and inverse
+- External uploads: store blobs immediately; inverse removes and purges blobs if unreferenced
+- Large/binary files: skip textual diff; store blob version references; surface size warnings
+- Cross-file refactors (multi-file rename/move): single transaction with multiple events
+
+Testing plan
+- Unit: reversible patches for each event kind; transaction coalescing; provider determinism
+- Integration: heavy typing + frequent resizes + tab moves endurance test; persistence across reloads; trash restore windows
+- Fuzz: random sequences of file ops + undos to detect invariant breaks (no orphaned tabs, no dangling refs)
+- Migration: schema upgrades with real user data
+
+Phased roadmap
+1) Core engine (events, transactions, providers, IndexedDB persistence). Keyboard bindings and basic timeline. No Git. 
+2) File content history via Monaco patches + per-file local history view. Soft-deletes + Trash.
+3) UI actions: panel resizes, tab/pane operations, theme/settings changes with coalescing.
+4) Git optional layer (isomorphic-git) + commits, diff, revert. Export/import.
+5) Snapshots and compaction, background worker for maintenance, polish UX.
+
+Non-goals (initially)
+- Collaborative multi-user undo/redo (CRDT). Future possibility, but single-user first.
+- Server/runtime state undo; history is for IDE and workspace data, not process execution.
+
+## Feasibility: Using the Git algorithm in the browser
+
+Short answer
+- Yes, it is feasible to use a real Git implementation in the browser for file content history and checkpoints, within our static-site and local-first constraints. The practical path is isomorphic-git (pure JS) backed by IndexedDB/OPFS, running mostly in a Web Worker. We should keep our event-sourced IDE history for UI actions and bridge it to Git for file-state checkpoints.
+
+What “use the Git algorithm” means here
+- Store the working tree (files in workspace) in a virtual FS in the browser (IndexedDB or OPFS) and create real commits, trees, and blobs.
+- Compute diffs and show per-file history based on Git objects (optionally pack/delta encode for space efficiency).
+- Support revert/checkout to a commit to restore file contents.
+- Optionally generate packfiles/zip for export.
+- No backend or remote required; remotes can be added later if ever desired, but are non-goals now.
+
+Viable approaches
+- isomorphic-git (recommended)
+  - Pros: Pure JS, mature, works in Service/Workers, supports commits, branches, logs, status, diff, pack.
+  - Storage: lightning-fs (IndexedDB) or idb-keyval; OPFS adapter also possible for Chromium-based browsers.
+  - Bundle size: reasonable; tree-shakable. Runs entirely client-side.
+  - Community usage: proven in StackBlitz-like and web IDE scenarios.
+  - Fits our static-site constraint: no native/WASM init hurdles, no C/C++ symbols.
+- libgit2 via WebAssembly (alternative)
+  - Pros: Very complete and fast C implementation.
+  - Cons: Larger payload, complex bindings, async FS integration, maintenance burden; likely overkill for our scope.
+  - Conclusion: Not recommended initially; reconsider only if isomorphic-git proves insufficient for scale/perf.
+
+Storage backends and limits
+- IndexedDB is universally available and adequate up to hundreds of MB per origin (quota varies by browser/storage pressure).
+- OPFS (Origin Private File System) can offer better perf/streaming but is not available on all browsers; use it opportunistically.
+- Space efficiency
+  - Git already de-duplicates identical content by blob hash.
+  - Packfiles and delta compression can reduce size further; isomorphic-git supports pack, but CPU cost rises on large repos.
+- Policy: soft cap per workspace (e.g., 200 MB) with UI to prune old commits/exports.
+
+Performance considerations
+- Compute-intensive operations (diff, writeObject, pack) must run in a Web Worker to keep UI smooth.
+- For typical browserver projects (tens to low hundreds of files, mostly text), commit and diff times are acceptable.
+- Coalesce app-level events into fewer file writes; only commit on Save All/idle to avoid micro-commits.
+
+Scope fit with our Undo/Redo plan
+- Keep event-sourced history as the primary undo/redo mechanism for:
+  - UI state (layout, tabs, theme, settings)
+  - File/folder operations and text edits at fine granularity
+- Use Git for durable checkpoints and per-file history/diff browsing.
+- Bridge: store the transaction ids included in each synthesized commit message; allow restoring working tree from a commit without affecting UI history unless user requests reset.
+
+Security and platform constraints
+- No network access required. If we later add remotes, CORS and credential flows are complex and out of scope for now.
+- File permissions, symlinks, and executable bits are mostly irrelevant for browser projects; model them minimally or ignore.
+- Timestamps and authorship: derive author from local identity settings; use local time. No PGP signing initially.
+
+Feasibility risks and mitigations
+- Large binary assets: avoid diffing; store as blobs; optionally exclude from Git or commit with size warnings.
+- Quota exhaustion: surface storage usage, enable pruning/packing/export.
+- Performance spikes on pack: run in Worker, throttle, and allow user to cancel; schedule maintenance when idle.
+
+Recommendation
+- Adopt isomorphic-git as an optional layer for file history.
+- Keep our event log as the authoritative source for undo/redo across IDE actions.
+- Ship behind a feature flag; enable per-workspace. Provide export to zip/pack.
+
+Implementation checklist (minimal, incremental)
+- Add a GitRepoProvider abstraction that mirrors the current file tree from WorkspaceStore to an isomorphic-git FS. Start with IndexedDB backend.
+- Implement Create Commit flow: Save All or idle timer synthesizes a commit with message summarizing last N transactions; include transaction ids in footer.
+- Diff/History views: per-file commit list and diff using isomorphic-git APIs; lazy-load in a Web Worker.
+- Restore: checkout a commit into working tree (files provider), wrapped in a transaction so undo can revert the restore.
+- Export: pack or zip the repo; import path initializes repo and seeds event log.
+- Metrics + guardrails: track commit size/time, show usage, enforce soft caps.
+
+Conclusion
+- Yes, using the Git algorithm is feasible within our constraints. The best path is an optional isomorphic-git integration running in a Worker, complemented by our event-sourced history for UI/IDE actions. This yields durable, inspectable file history without sacrificing the responsiveness or the static-site promise.
+
 ## Future: Peer Distribution Network
 
 Not an immediate workstream, but a future direction that should inform current architecture.

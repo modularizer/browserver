@@ -13,16 +13,18 @@ import { Resizer } from './shell/Resizer'
 import { RightPanel } from './shell/RightPanel'
 import { Sidebar } from './shell/Sidebar'
 import { StatusBar } from './shell/StatusBar'
+import { useFavicon } from './shell/favicon'
 import { TabBar } from './shell/TabBar'
 import { samples } from './samples'
 import { useCommandPaletteStore } from './store/commandPalette'
 import { useCheckpointStore } from './store/checkpoints'
+import { useHistoryStore } from './store/history'
 import { useDatabaseStore } from './store/database'
 import { layoutPresets, useLayoutStore } from './store/layout'
 import { useRuntimeStore } from './store/runtime'
 import { useTrustStore } from './store/trust'
 import { themes, useThemeStore, applyCssVariables, applyMonacoTheme } from './theme'
-import { editorViewDefinitions, getEditorItemLabel, useWorkspaceStore, type EditorPaneId, type EditorViewId } from './store/workspace'
+import { editorViewDefinitions, getEditorItemLabel, parseBrowserYaml, useWorkspaceStore, type EditorPaneId, type EditorViewId } from './store/workspace'
 
 interface PendingExternalImport {
   files: File[]
@@ -263,6 +265,7 @@ function TitleBar({
 }
 
 export function App() {
+  useFavicon()
   const fileInputRef = useRef<HTMLInputElement>(null)
   const externalDragDepthRef = useRef(0)
   const [settingsOpen, setSettingsOpen] = useState(false)
@@ -296,6 +299,7 @@ export function App() {
   const openEditorView = useWorkspaceStore((state) => state.openEditorView)
   const reorderOpenFile = useWorkspaceStore((state) => state.reorderOpenFile)
   const hydrate = useWorkspaceStore((state) => state.hydrate)
+  const hydrated = useWorkspaceStore((state) => state.hydrated)
   const sample = useWorkspaceStore((state) => state.sample)
   const files = useWorkspaceStore((state) => state.files)
   const paneFiles = useWorkspaceStore((state) => state.paneFiles)
@@ -313,10 +317,15 @@ export function App() {
   const importTrust = useTrustStore((state) => state.importSnapshot)
   const hydrateCheckpoints = useCheckpointStore((state) => state.hydrate)
   const createCheckpoint = useCheckpointStore((state) => state.createCheckpoint)
+  const hydrateHistory = useHistoryStore((state) => state.hydrate)
+  const undo = useHistoryStore((state) => state.undo)
+  const redo = useHistoryStore((state) => state.redo)
   const startCurrentServer = useRuntimeStore((state) => state.startCurrentServer)
   const restartCurrentServer = useRuntimeStore((state) => state.restartCurrentServer)
   const stopServer = useRuntimeStore((state) => state.stopServer)
   const runClientFile = useRuntimeStore((state) => state.runClientFile)
+  const runPane = useRuntimeStore((state) => state.runPane)
+  const runtimeStatus = useRuntimeStore((state) => state.status)
   const themeId = useThemeStore((state) => state.themeId)
   const applyThemeId = useThemeStore((state) => state.applyThemeId)
   const currentTheme = useThemeStore((state) => state.theme())
@@ -334,6 +343,7 @@ export function App() {
     showBottom,
     showRight,
   }
+  const syncBrowserYaml = useWorkspaceStore((state) => state.syncBrowserYaml)
 
   const buildCurrentBundle = (): ProjectBundle => {
     const workspace: WorkspaceSnapshot = {
@@ -523,13 +533,15 @@ export function App() {
           path: `/${id}/server.ts`,
           language: 'typescript',
           content: [
-            "import { serveClientSideServer } from '@modularizer/plat/client-server'",
+            "import { serveClientSideServer } from '@modularizer/plat-client/client-server'",
             '',
-            'serveClientSideServer({',
-            "  openapi: '3.1.0',",
-            '  info: { title: "New Project", version: "0.1.0" },',
-            '  paths: {},',
-            '})',
+            'class Api {',
+            '  async hello() {',
+            '    return { message: "Hello, World!" }',
+            '  }',
+            '}',
+            '',
+            "export default serveClientSideServer('api', [Api])",
             '',
           ].join('\n'),
           updatedAt: Date.now(),
@@ -714,6 +726,35 @@ export function App() {
     void hydrate()
   }, [hydrate])
 
+  // Restart servers that were running before page refresh
+  const hasRestoredServers = useRef(false)
+  useEffect(() => {
+    if (!hydrated || hasRestoredServers.current) return
+    hasRestoredServers.current = true
+
+    const yamlFile = files.find((f) => f.name === '.browserver.yaml')
+    if (!yamlFile) return
+
+    try {
+      const config = parseBrowserYaml(yamlFile.content)
+      const servers = config.runtime?.servers as Record<string, string> | undefined
+      if (!servers) return
+
+      for (const [pane, filePath] of Object.entries(servers)) {
+        if (filePath && (pane === 'primary' || pane === 'secondary' || pane === 'tertiary')) {
+          // Ensure the pane has the server file active before running
+          const ws = useWorkspaceStore.getState()
+          const fileExists = ws.files.some((f) => f.path === filePath)
+          if (fileExists) {
+            void runPane(pane as EditorPaneId)
+          }
+        }
+      }
+    } catch {
+      // ignore parse errors
+    }
+  }, [hydrated, files, runPane])
+
   useEffect(() => {
     void refreshProjects()
   }, [])
@@ -729,6 +770,15 @@ export function App() {
   useEffect(() => {
     void hydrateCheckpoints(sample.id)
   }, [hydrateCheckpoints, sample.id])
+
+  useEffect(() => {
+    void hydrateHistory(sample.id)
+  }, [hydrateHistory, sample.id])
+
+  // Keep .browserver.yaml in sync with theme and layout changes
+  useEffect(() => {
+    syncBrowserYaml()
+  }, [syncBrowserYaml, themeId, sidebarWidth, bottomHeight, rightWidth, showSidebar, showBottom, showRight, runtimeStatus])
 
   useEffect(() => {
     void refreshProjects()
@@ -795,6 +845,29 @@ export function App() {
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [openCommandPalette])
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      const key = event.key.toLowerCase()
+      const isMac = /mac/i.test(navigator.platform)
+      // Undo
+      if (key === 'z' && (isMac ? event.metaKey : event.ctrlKey) && !event.altKey && !event.repeat) {
+        event.preventDefault()
+        void undo()
+        return
+      }
+      // Redo: Ctrl+Y (Win/Linux) or Shift+Cmd+Z (macOS); also Ctrl+Shift+Z common
+      const redoCombo =
+        (isMac && key === 'z' && event.metaKey && event.shiftKey) ||
+        (!isMac && ((key === 'y' && event.ctrlKey) || (key === 'z' && event.ctrlKey && event.shiftKey)))
+      if (redoCombo && !event.altKey && !event.repeat) {
+        event.preventDefault()
+        void redo()
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [redo, undo])
 
   useEffect(() => {
     if (!draggedEditorItem) return
