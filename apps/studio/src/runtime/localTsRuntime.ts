@@ -8,11 +8,13 @@ import type {
 export async function startLocalTsRuntime(options: {
   source: string | Record<string, string>
   serverName: string
+  onRequest?: (direction: 'request' | 'response', payload: unknown) => void
 }): Promise<LocalRuntimeHandle> {
   const started = await startClientSideServerFromSource({
     source: options.source,
     serverName: options.serverName,
     sourceEntryPoint: typeof options.source === 'object' && 'index.ts' in options.source ? 'index.ts' : undefined,
+    onRequest: options.onRequest,
   })
 
   const connectionUrl = started.connectionUrl

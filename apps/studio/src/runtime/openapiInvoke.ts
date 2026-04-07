@@ -14,3 +14,4 @@ export async function invokeOpenApiClientOperation(
   if (m === 'DELETE') return client.delete(operation.path as never, input as never)
   throw new Error(`Unsupported HTTP method ${operation.method}`)
 }
+

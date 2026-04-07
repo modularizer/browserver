@@ -121,6 +121,18 @@ const runtimeHandles: Partial<Record<EditorPaneId, LocalRuntimeHandle | null>> =
 
 /** Active plat CSS (MQTT/WebRTC) client for the playground target; not used for HTTP APIs. */
 let cssPlaygroundClient: { baseUrl: string; client: OpenAPIClient } | null = null
+const pendingServerRequests: Partial<Record<EditorPaneId, Map<string, {
+  operationId: string
+  operationLabel?: string
+  method: string
+  path: string
+  input: Record<string, unknown>
+  startedAt: number
+}>>> = {
+  primary: new Map(),
+  secondary: new Map(),
+  tertiary: new Map(),
+}
 
 let highlightTimer: number | null = null
 const RECENT_CLIENT_TARGETS_KEY = 'browserver:recent-client-targets'
@@ -183,6 +195,138 @@ function getDefaultClientTarget(state: RuntimeState): string {
 
 function formatTimelineStage(entry: RuntimeRequestTimelineEntry): string {
   return `[${entry.stage}] ${entry.title}`
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null
+}
+
+function fallbackOperationId(path: string): string {
+  const segments = path.split('/').filter(Boolean)
+  return segments[segments.length - 1] ?? (path.replace(/^\//, '') || 'request')
+}
+
+function resolveOperationSnapshot(
+  operations: RuntimeOperation[],
+  payload: Record<string, unknown>,
+): {
+  operationId: string
+  operationLabel: string
+  method: string
+  path: string
+} | null {
+  const method = typeof payload.method === 'string' ? payload.method.toUpperCase() : null
+  const path = typeof payload.path === 'string' ? payload.path : null
+  const operationId = typeof payload.operationId === 'string' ? payload.operationId : null
+
+  if (!method || !path) return null
+  if (path === '/openapi.json' || path === '/tools') return null
+
+  const matched = operations.find((operation) => (
+    (operationId && operation.id === operationId)
+      || (operation.method.toUpperCase() === method && operation.path === path)
+  ))
+
+  if (matched) {
+    return {
+      operationId: matched.id,
+      operationLabel: matched.label,
+      method: matched.method,
+      path: matched.path,
+    }
+  }
+
+  const fallbackId = operationId ?? fallbackOperationId(path)
+  return {
+    operationId: fallbackId,
+    operationLabel: fallbackId,
+    method,
+    path,
+  }
+}
+
+function recordRuntimeTelemetry(
+  set: (partial: Partial<RuntimeState>) => void,
+  get: () => RuntimeState,
+  pane: EditorPaneId,
+  direction: 'request' | 'response',
+  payload: unknown,
+) {
+  const message = asRecord(payload)
+  if (!message) return
+
+  const requestId = message.id == null ? null : String(message.id)
+  if (!requestId) return
+
+  const pending = pendingServerRequests[pane] ?? (pendingServerRequests[pane] = new Map())
+
+  if (direction === 'request') {
+    const operation = resolveOperationSnapshot(get().operations, message)
+    if (!operation) return
+
+    const input = asRecord(message.input) ?? {}
+    pending.set(requestId, {
+      operationId: operation.operationId,
+      operationLabel: operation.operationLabel,
+      method: operation.method,
+      path: operation.path,
+      input,
+      startedAt: Date.now(),
+    })
+
+    setHighlightedHandler(set, operation.operationId)
+    set({
+      logs: [
+        logEntry('event', `Incoming ${operation.operationLabel} in ${pane}`, input),
+        ...get().logs,
+      ].slice(0, 200),
+    })
+    return
+  }
+
+  const request = pending.get(requestId)
+  if (!request) return
+  pending.delete(requestId)
+
+  const endedAt = Date.now()
+  const ok = message.ok !== false
+  const errorRecord = asRecord(message.error)
+  const errorMessage = typeof errorRecord?.message === 'string'
+    ? errorRecord.message
+    : 'Request failed'
+
+  const entry: RuntimeRequestEntry = {
+    id: crypto.randomUUID(),
+    operationId: request.operationId,
+    operationLabel: request.operationLabel,
+    method: request.method,
+    path: request.path,
+    input: request.input,
+    ok,
+    result: ok ? message.result : undefined,
+    error: ok
+      ? undefined
+      : {
+          status: typeof errorRecord?.status === 'number' ? errorRecord.status : undefined,
+          message: errorMessage,
+        },
+    events: [{ kind: 'response', payload }],
+    startedAt: request.startedAt,
+    endedAt,
+    durationMs: endedAt - request.startedAt,
+    timeline: [],
+  }
+
+  set({
+    activeRequestId: entry.id,
+    requests: [entry, ...get().requests].slice(0, 50),
+    logs: [
+      logEntry(ok ? 'info' : 'error', `${ok ? 'Completed' : 'Failed'} ${entry.operationLabel ?? entry.operationId}`, ok ? entry.result : entry.error),
+      ...get().logs,
+    ].slice(0, 200),
+  })
 }
 
 function setHighlightedHandler(
@@ -358,6 +502,9 @@ export const useRuntimeStore = create<RuntimeState>()((set, get) => ({
           ? await startLocalTsRuntime({
               source: targetFile.content,
               serverName: `${workspace.sample.id}-${pane}`,
+              onRequest: (direction, payload) => {
+                recordRuntimeTelemetry(set, get, pane, direction, payload)
+              },
             })
           : await startPythonRuntime({
               source: targetFile.content,
@@ -553,6 +700,8 @@ export const useRuntimeStore = create<RuntimeState>()((set, get) => ({
       await runtimeHandles[pane]?.stop()
       runtimeHandles[pane] = null
     }
+        pendingServerRequests[pane]?.clear()
+    pendingServerRequests[pane]?.clear()
 
     updatePaneSession(set, get, pane, createEmptyPaneSession())
     if (get().activeRuntimePane === pane) {
@@ -636,8 +785,6 @@ export const useRuntimeStore = create<RuntimeState>()((set, get) => ({
         ...get().logs,
       ],
     })
-    setHighlightedHandler(set, operation.id)
-
     try {
       const trimmedTarget = targetUrl.trim()
 
@@ -650,34 +797,12 @@ export const useRuntimeStore = create<RuntimeState>()((set, get) => ({
         }
         const cssClient = cssPlaygroundClient?.client
         if (cssClient) {
-          const data = await invokeOpenApiClientOperation(cssClient, operation, input)
-          const endedAt = Date.now()
-          const entry: RuntimeRequestEntry = {
-            id: crypto.randomUUID(),
-            operationId,
-            operationLabel: operation.label,
-            method: operation.method,
-            path: operation.path,
-            input,
-            ok: true,
-            result: data,
-            events: [],
-            startedAt,
-            endedAt,
-            durationMs: endedAt - startedAt,
-            timeline: [],
-          }
-          set({
-            activeRequestId: entry.id,
-            requests: [entry, ...get().requests].slice(0, 50),
-            logs: [
-              logEntry('info', `Completed ${entry.operationLabel ?? entry.operationId}`, entry.result),
-              ...get().logs,
-            ].slice(0, 200),
-          })
+          await invokeOpenApiClientOperation(cssClient, operation, input)
           return
         }
       }
+
+      setHighlightedHandler(set, operation.id)
 
       let base = normalizeClientApiBaseUrl(trimmedTarget)
       if (base.startsWith('css://')) {
