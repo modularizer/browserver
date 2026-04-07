@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
 import { MenuButton } from './MenuButton'
-import { selectPaneRuntimeSession, useRuntimeStore } from '../store/runtime'
+import { selectTabRuntimeSession, useRuntimeStore } from '../store/runtime'
 import {
   editorViewDefinitions,
   getEditorItemLabels,
@@ -13,10 +13,14 @@ export function TabBar({
   onStartTabDrag,
   onEndTabDrag,
   onReorderTab,
+  onRequestClosePath,
+  onRequestClosePaths,
 }: {
   onStartTabDrag: (path: string) => void
   onEndTabDrag: () => void
   onReorderTab: (path: string, beforePath: string) => void
+  onRequestClosePath: (path: string) => void
+  onRequestClosePaths: (paths: string[]) => void
 }) {
   const rootRef = useRef<HTMLDivElement>(null)
   const pendingDragRef = useRef<{
@@ -48,9 +52,8 @@ export function TabBar({
   const assignFileToPane = useWorkspaceStore((state) => state.assignFileToPane)
   const splitFileToPane = useWorkspaceStore((state) => state.splitFileToPane)
   const focusEditorPane = useWorkspaceStore((state) => state.focusEditorPane)
-  const closeFile = useWorkspaceStore((state) => state.closeFile)
-  const closePaths = useWorkspaceStore((state) => state.closePaths)
-  const primaryRuntime = useRuntimeStore(selectPaneRuntimeSession('primary'))
+  const primaryRuntime = useRuntimeStore(selectTabRuntimeSession(paneFiles.primary))
+  const tabSessions = useRuntimeStore((state) => state.tabSessions)
   const runPane = useRuntimeStore((state) => state.runPane)
   const stopPane = useRuntimeStore((state) => state.stopPane)
   const itemLabels = useMemo(() => getEditorItemLabels(orderedPaths, files, viewTitles), [files, orderedPaths, viewTitles])
@@ -219,7 +222,7 @@ export function TabBar({
         id: 'close.current',
         label: 'Close',
         run: () => {
-          closeFile(path)
+          onRequestClosePath(path)
           setContextMenu(null)
         },
       })
@@ -227,7 +230,7 @@ export function TabBar({
         id: 'close.all',
         label: 'Close All',
         run: () => {
-          closePaths(orderedPaths)
+          onRequestClosePaths(orderedPaths)
           setContextMenu(null)
         },
       })
@@ -235,7 +238,7 @@ export function TabBar({
         id: 'close.others',
         label: 'Close Others',
         run: () => {
-          closePaths(orderedPaths.filter((entry) => entry !== path))
+          onRequestClosePaths(orderedPaths.filter((entry) => entry !== path))
           setContextMenu(null)
         },
       })
@@ -243,7 +246,7 @@ export function TabBar({
         id: 'close.left',
         label: 'Close Tabs To Left',
         run: () => {
-          closePaths(orderedPaths.slice(0, index))
+          onRequestClosePaths(orderedPaths.slice(0, index))
           setContextMenu(null)
         },
       })
@@ -251,14 +254,14 @@ export function TabBar({
         id: 'close.right',
         label: 'Close Tabs To Right',
         run: () => {
-          closePaths(orderedPaths.slice(index + 1))
+          onRequestClosePaths(orderedPaths.slice(index + 1))
           setContextMenu(null)
         },
       })
     }
 
     return actions
-  }, [assignFileToPane, closeFile, closePaths, contextMenu, focusEditorPane, orderedPaths, paneFiles.primary, paneTabs.primary.tabs, paneTabs.secondary.tabs, paneTabs.tertiary.tabs, splitFileToPane])
+  }, [assignFileToPane, contextMenu, focusEditorPane, onRequestClosePath, onRequestClosePaths, orderedPaths, paneFiles.primary, paneTabs.primary.tabs, paneTabs.secondary.tabs, paneTabs.tertiary.tabs, splitFileToPane])
 
   return (
     <div ref={rootRef} className="flex-none flex h-[30px] overflow-hidden border-b border-bs-border bg-bs-bg-panel">
@@ -324,6 +327,17 @@ export function TabBar({
             title={item.isView ? `${item.label} section` : 'Drag within the row to reorder, or drag out to split'}
           >
             <div className="flex items-center gap-2">
+              {!item.isView ? (
+                <span
+                  className={`h-1.5 w-1.5 rounded-full ${
+                    tabSessions[item.path]?.mode === 'server' && (tabSessions[item.path]?.status === 'running' || tabSessions[item.path]?.status === 'starting')
+                      ? 'bg-bs-good'
+                      : tabSessions[item.path]?.status === 'error'
+                        ? 'bg-bs-error'
+                        : 'bg-bs-text-faint'
+                  }`}
+                />
+              ) : null}
               <span>{item.label}</span>
               {!item.isView && dirtyFilePaths.includes(item.path) ? (
                 <span className="text-bs-accent">●</span>
@@ -333,7 +347,7 @@ export function TabBar({
               <button
                 onClick={(event: ReactMouseEvent<HTMLButtonElement>) => {
                   event.stopPropagation()
-                  closeFile(item.path)
+                  onRequestClosePath(item.path)
                 }}
                 draggable={false}
                 className="ml-2 text-bs-text-faint hover:text-bs-text"

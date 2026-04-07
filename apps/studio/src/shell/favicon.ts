@@ -31,11 +31,11 @@ function setFavicon(svg: string) {
   linkEl.href = `data:image/svg+xml,${encodeURIComponent(svg)}`
 }
 
-// Also check individual pane statuses so the favicon reflects any running server,
-// not just the currently focused pane.
-function aggregateStatus(state: { status: string; paneSessions: Record<string, { status: string }> }): string {
+// Also check tab sessions so the favicon reflects any running server,
+// not just the currently focused pane/tab.
+function aggregateStatus(state: { status: string; tabSessions: Record<string, { status: string }> }): string {
   if (state.status === 'running') return 'running'
-  for (const ps of Object.values(state.paneSessions)) {
+  for (const ps of Object.values(state.tabSessions)) {
     if (ps.status === 'running') return 'running'
     if (ps.status === 'starting') return 'starting'
     if (ps.status === 'error') return 'error'

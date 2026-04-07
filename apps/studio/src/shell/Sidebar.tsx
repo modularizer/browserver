@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { selectActiveFile, useWorkspaceStore, type WorkspaceFile } from '../store/workspace'
 import { useLayoutStore } from '../store/layout'
+import { useHistoryStore } from '../store/history'
 
 interface FolderNode {
   fullPath: string
@@ -12,6 +13,53 @@ interface FolderNode {
 type DragEntry =
   | { kind: 'file'; path: string }
   | { kind: 'folder'; path: string }
+
+const SIDEBAR_HISTORY_HEIGHT_KEY_PREFIX = 'browserver:sidebar-history-height:'
+
+function sidebarHistoryHeightKey(workspaceId: string): string {
+  return `${SIDEBAR_HISTORY_HEIGHT_KEY_PREFIX}${workspaceId}`
+}
+
+function summarizeTransactionDiff(entry: { pre: { workspace: { files: Array<{ path: string; content: string }> } }; post: { workspace: { files: Array<{ path: string; content: string }> } } }) {
+  const before = new Map(entry.pre.workspace.files.map((file) => [file.path, file.content]))
+  const after = new Map(entry.post.workspace.files.map((file) => [file.path, file.content]))
+  const allPaths = new Set<string>([...before.keys(), ...after.keys()])
+
+  let filesChanged = 0
+  let addedLines = 0
+  let removedLines = 0
+
+  const countLineDiff = (oldText: string, newText: string) => {
+    const oldCounts = new Map<string, number>()
+    for (const line of oldText.split('\n')) {
+      oldCounts.set(line, (oldCounts.get(line) ?? 0) + 1)
+    }
+    let added = 0
+    for (const line of newText.split('\n')) {
+      const count = oldCounts.get(line) ?? 0
+      if (count > 0) {
+        oldCounts.set(line, count - 1)
+      } else {
+        added += 1
+      }
+    }
+    let removed = 0
+    for (const count of oldCounts.values()) removed += count
+    return { added, removed }
+  }
+
+  for (const path of allPaths) {
+    const oldContent = before.get(path) ?? ''
+    const newContent = after.get(path) ?? ''
+    if (oldContent === newContent) continue
+    filesChanged += 1
+    const diff = countLineDiff(oldContent, newContent)
+    addedLines += diff.added
+    removedLines += diff.removed
+  }
+
+  return { filesChanged, addedLines, removedLines }
+}
 
 function hasExternalFiles(dataTransfer: DataTransfer | null): boolean {
   if (!dataTransfer) return false
@@ -34,6 +82,7 @@ export function Sidebar({
   const dirtyFilePaths = useWorkspaceStore((state) => state.dirtyFilePaths)
   const activeFile = useWorkspaceStore(selectActiveFile)
   const activeEditorPane = useWorkspaceStore((state) => state.activeEditorPane)
+  const workspaceId = useWorkspaceStore((state) => state.sample.id)
   const renamingPath = useWorkspaceStore((state) => state.renamingPath)
   const renamingFolderPath = useWorkspaceStore((state) => state.renamingFolderPath)
   const setActiveFile = useWorkspaceStore((state) => state.setActiveFile)
@@ -55,6 +104,8 @@ export function Sidebar({
   const [draggedEntry, setDraggedEntry] = useState<DragEntry | null>(null)
   const [hoveredDropTarget, setHoveredDropTarget] = useState<string | null>(null)
   const [collapsedFolders, setCollapsedFolders] = useState<string[]>([])
+  const [historyHeight, setHistoryHeight] = useState(220)
+  const historyResizeRef = useRef<{ startY: number; startHeight: number } | null>(null)
   const [contextMenu, setContextMenu] = useState<{
     kind: 'file' | 'folder'
     path: string
@@ -102,24 +153,57 @@ export function Sidebar({
     }
   }, [contextMenu])
 
-  const workspaceId = useWorkspaceStore((s) => s.sample.id)
-  const setActiveBottomPanel = useWorkspaceStore((s) => s.setActiveBottomPanel)
-  const [commits, setCommits] = useState<Array<{ oid: string; message: string; author?: { name?: string; email?: string; timestamp?: number } }>>([])
+  useEffect(() => {
+    const onMouseMove = (event: MouseEvent) => {
+      const resize = historyResizeRef.current
+      if (!resize) return
+      const rootHeight = rootRef.current?.clientHeight ?? 0
+      const maxHeight = Math.max(160, rootHeight - 220)
+      const next = resize.startHeight - (event.clientY - resize.startY)
+      setHistoryHeight(Math.max(140, Math.min(maxHeight, Math.round(next))))
+    }
+
+    const onMouseUp = () => {
+      if (!historyResizeRef.current) return
+      historyResizeRef.current = null
+      document.body.style.userSelect = ''
+      document.body.style.cursor = ''
+    }
+
+    window.addEventListener('mousemove', onMouseMove)
+    window.addEventListener('mouseup', onMouseUp)
+    return () => {
+      window.removeEventListener('mousemove', onMouseMove)
+      window.removeEventListener('mouseup', onMouseUp)
+      document.body.style.userSelect = ''
+      document.body.style.cursor = ''
+    }
+  }, [])
 
   useEffect(() => {
-    let cancelled = false
-    async function load() {
-      try {
-        const mod = await import('../store/git')
-        const list = await mod.log(workspaceId, 50)
-        if (!cancelled) setCommits(list)
-      } catch (err) {
-        console.warn('Failed to load commits', err)
-      }
+    try {
+      const raw = window.localStorage.getItem(sidebarHistoryHeightKey(workspaceId))
+      if (!raw) return
+      const parsed = Number(raw)
+      if (!Number.isFinite(parsed)) return
+      const rootHeight = rootRef.current?.clientHeight ?? 0
+      const maxHeight = rootHeight > 0 ? Math.max(160, rootHeight - 220) : 420
+      setHistoryHeight(Math.max(140, Math.min(maxHeight, Math.round(parsed))))
+    } catch {
+      // ignore invalid persisted values
     }
-    void load()
-    return () => { cancelled = true }
   }, [workspaceId])
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(sidebarHistoryHeightKey(workspaceId), String(Math.round(historyHeight)))
+    } catch {
+      // ignore storage quota/access errors
+    }
+  }, [workspaceId, historyHeight])
+
+  const historyItems = useHistoryStore((s) => s.items)
+  const setActiveBottomPanel = useWorkspaceStore((s) => s.setActiveBottomPanel)
 
   return (
     <div
@@ -377,8 +461,18 @@ export function Sidebar({
         </div>
       ) : null}
 
-      {/* Version history (Git commits) */}
-      <div className="flex-none border-t border-bs-border bg-bs-bg-sidebar/60">
+      {/* Version history */}
+      <div className="flex-none border-t border-bs-border bg-bs-bg-sidebar/60" style={{ height: historyHeight }}>
+        <div
+          className="h-1 w-full cursor-row-resize bg-transparent hover:bg-bs-border"
+          onMouseDown={(event) => {
+            event.preventDefault()
+            historyResizeRef.current = { startY: event.clientY, startHeight: historyHeight }
+            document.body.style.userSelect = 'none'
+            document.body.style.cursor = 'row-resize'
+          }}
+          title="Resize history"
+        />
         <div className="flex items-center justify-between px-3 py-1">
           <div className="text-[10px] font-semibold uppercase tracking-wider text-bs-text-faint">History</div>
           <button
@@ -389,24 +483,27 @@ export function Sidebar({
             Open
           </button>
         </div>
-        <div className="max-h-48 overflow-auto px-2 pb-2">
-          {commits.length === 0 ? (
-            <div className="px-2 py-1 text-[11px] text-bs-text-faint">- no commits yet -</div>
+        <div className="bs-scrollbar h-[calc(100%-30px)] overflow-auto px-2 pb-2">
+          {historyItems.length === 0 ? (
+            <div className="px-2 py-1 text-[11px] text-bs-text-faint">- no history yet -</div>
           ) : (
-            commits.map((c) => {
-              const firstLine = (c.message || '').split('\n')[0] || '(no message)'
-              const short = c.oid.slice(0, 7)
-              const author = c.author?.name || 'browserver'
+            historyItems.slice().reverse().slice(0, 30).map((entry) => {
+              const time = new Date(entry.ts).toLocaleTimeString()
+              const diff = summarizeTransactionDiff(entry)
               return (
-                <div key={c.oid} className="group/row cursor-pointer rounded px-2 py-1 text-[11px] text-bs-text-muted hover:bg-bs-bg-hover hover:text-bs-text"
+                <div key={entry.id} className="group/row cursor-pointer rounded px-2 py-1 text-[11px] text-bs-text-muted hover:bg-bs-bg-hover hover:text-bs-text"
                   onClick={() => setActiveBottomPanel('history')}
-                  title={`${c.oid} — ${c.message}`}
+                  title={entry.label}
                 >
                   <div className="flex items-center gap-2">
-                    <span className="text-bs-accent font-mono">{short}</span>
-                    <span className="truncate">{firstLine}</span>
+                    <span className="text-bs-accent font-mono">{time}</span>
+                    <span className="truncate">{entry.label}</span>
                   </div>
-                  <div className="ml-6 text-[10px] text-bs-text-faint">{author}</div>
+                  <div className="ml-6 flex items-center gap-2 text-[10px]">
+                    <span className="text-bs-good">+{diff.addedLines}</span>
+                    <span className="text-bs-error">-{diff.removedLines}</span>
+                    <span className="text-bs-text-faint">{diff.filesChanged} file{diff.filesChanged === 1 ? '' : 's'} changed</span>
+                  </div>
                 </div>
               )
             })

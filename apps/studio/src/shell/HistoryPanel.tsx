@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { useCheckpointStore } from '../store/checkpoints'
+import { useHistoryStore } from '../store/history'
 import { useWorkspaceStore } from '../store/workspace'
 
 interface HistoryPanelProps {
@@ -14,6 +15,7 @@ export function HistoryPanel({ onCreateCheckpoint }: HistoryPanelProps) {
   const sample = useWorkspaceStore((state) => state.sample)
   const saveState = useCheckpointStore((state) => state.saveState)
   const items = useCheckpointStore((state) => state.items)
+  const transactions = useHistoryStore((state) => state.items)
   const restoreCheckpoint = useCheckpointStore((state) => state.restoreCheckpoint)
   const deleteCheckpoint = useCheckpointStore((state) => state.deleteCheckpoint)
   const [name, setName] = useState('')
@@ -55,8 +57,21 @@ export function HistoryPanel({ onCreateCheckpoint }: HistoryPanelProps) {
         </button>
       </div>
 
-      <div className="min-w-0 flex-1 overflow-auto rounded border border-bs-border bg-bs-bg-sidebar p-2">
+      <div className="bs-scrollbar min-w-0 flex-1 overflow-auto rounded border border-bs-border bg-bs-bg-sidebar p-2">
         <div className="mb-2 text-bs-text">history</div>
+        <div className="mb-3 rounded border border-bs-border bg-bs-bg-panel px-3 py-2">
+          <div className="text-[10px] uppercase tracking-[0.12em] text-bs-text-faint">editor transactions</div>
+          <div className="mt-2 flex flex-col gap-1">
+            {transactions.length > 0 ? transactions.slice().reverse().slice(0, 30).map((tx) => (
+              <div key={tx.id} className="flex items-center gap-2 text-[11px]">
+                <span className="text-bs-text">{tx.label}</span>
+                <span className="text-bs-text-faint">{formatTime(tx.ts)}</span>
+              </div>
+            )) : (
+              <div className="text-[11px] text-bs-text-faint">- no editor transactions yet -</div>
+            )}
+          </div>
+        </div>
         <div className="flex flex-col gap-2">
           {items.length > 0 ? items.map((item) => (
             <div key={item.id} className="rounded border border-bs-border bg-bs-bg-panel px-3 py-2">

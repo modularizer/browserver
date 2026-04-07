@@ -57,7 +57,7 @@ export interface RuntimeClientRunEntry {
   durationMs?: number
 }
 
-export interface PaneRuntimeSession {
+export interface TabRuntimeSession {
   mode: 'idle' | 'server' | 'client'
   language: 'typescript' | 'python' | null
   status: 'idle' | 'starting' | 'running' | 'error'
@@ -73,7 +73,7 @@ export interface PaneRuntimeSession {
 
 interface RuntimeState {
   activeRuntimePane: EditorPaneId
-  paneSessions: Record<EditorPaneId, PaneRuntimeSession>
+  tabSessions: Record<string, TabRuntimeSession>
   language: 'typescript' | 'python' | null
   status: 'idle' | 'starting' | 'running' | 'error'
   launchable: boolean
@@ -99,6 +99,8 @@ interface RuntimeState {
   focusPaneRuntime: (pane: EditorPaneId) => void
   runPane: (pane: EditorPaneId) => Promise<void>
   stopPane: (pane: EditorPaneId) => Promise<void>
+  stopTabByPath: (path: string) => Promise<void>
+  isTabRunning: (path: string) => boolean
   startCurrentServer: () => Promise<void>
   restartCurrentServer: () => Promise<void>
   stopServer: () => Promise<void>
@@ -112,44 +114,48 @@ interface RuntimeState {
   fetchOperations: (url: string) => Promise<void>
 }
 
-const runtimeHandles: Partial<Record<EditorPaneId, LocalRuntimeHandle | null>> = {
-  primary: null,
-  secondary: null,
-  tertiary: null,
-}
+const runtimeHandles = new Map<string, { pane: EditorPaneId; handle: LocalRuntimeHandle }>()
 
 /** Active plat OpenAPI client for the current playground target (css:// or http(s)://). */
 let playgroundClient: { baseUrl: string; client: OpenAPIClient } | null = null
-const pendingServerRequests: Partial<Record<EditorPaneId, Map<string, {
+const pendingServerRequests = new Map<string, Map<string, {
   operationId: string
   operationLabel?: string
   method: string
   path: string
   input: Record<string, unknown>
   startedAt: number
-}>>> = {
-  primary: new Map(),
-  secondary: new Map(),
-  tertiary: new Map(),
-}
+}>>()
 
 let highlightTimer: number | null = null
 const RECENT_CLIENT_TARGETS_KEY = 'browserver:recent-client-targets'
 
-function createEmptyPaneSession(): PaneRuntimeSession {
-  return {
-    mode: 'idle',
-    language: null,
-    status: 'idle',
-    launchable: false,
-    launchNote: null,
-    launchedFilePath: null,
-    launchedFileUpdatedAt: null,
-    connectionUrl: null,
-    serverName: null,
-    errorMessage: null,
-    lastClientStatus: 'idle',
-  }
+const EMPTY_TAB_SESSION: TabRuntimeSession = {
+  mode: 'idle',
+  language: null,
+  status: 'idle',
+  launchable: false,
+  launchNote: null,
+  launchedFilePath: null,
+  launchedFileUpdatedAt: null,
+  connectionUrl: null,
+  serverName: null,
+  errorMessage: null,
+  lastClientStatus: 'idle',
+}
+
+function createEmptyTabSession(): TabRuntimeSession {
+  return { ...EMPTY_TAB_SESSION }
+}
+
+function getPaneActivePath(pane: EditorPaneId): string | null {
+  const paneTabs = useWorkspaceStore.getState().paneTabs[pane]
+  return paneTabs.activePath ?? paneTabs.tabs[0] ?? null
+}
+
+function getTabSession(state: RuntimeState, path: string | null | undefined): TabRuntimeSession {
+  if (!path) return EMPTY_TAB_SESSION
+  return state.tabSessions[path] ?? EMPTY_TAB_SESSION
 }
 
 function logEntry(level: RuntimeLogEntry['level'], message: string, detail?: unknown): RuntimeLogEntry {
@@ -257,6 +263,7 @@ function resolveOperationSnapshot(
 function recordRuntimeTelemetry(
   set: (partial: Partial<RuntimeState>) => void,
   get: () => RuntimeState,
+  filePath: string,
   pane: EditorPaneId,
   direction: 'request' | 'response',
   payload: unknown,
@@ -267,7 +274,15 @@ function recordRuntimeTelemetry(
   const requestId = message.id == null ? null : String(message.id)
   if (!requestId) return
 
-  const pending = pendingServerRequests[pane] ?? (pendingServerRequests[pane] = new Map())
+  const pending = pendingServerRequests.get(filePath) ?? new Map<string, {
+    operationId: string
+    operationLabel?: string
+    method: string
+    path: string
+    input: Record<string, unknown>
+    startedAt: number
+  }>()
+  if (!pendingServerRequests.has(filePath)) pendingServerRequests.set(filePath, pending)
 
   if (direction === 'request') {
     const operation = resolveOperationSnapshot(get().operations, message)
@@ -286,7 +301,7 @@ function recordRuntimeTelemetry(
     setHighlightedHandler(set, operation.operationId)
     set({
       logs: [
-        logEntry('event', `Incoming ${operation.operationLabel} in ${pane}`, input),
+        logEntry('event', `Incoming ${operation.operationLabel} in ${pane}:${filePath}`, input),
         ...get().logs,
       ].slice(0, 200),
     })
@@ -370,8 +385,8 @@ export function selectRuntimeIsStale(state: RuntimeState): boolean {
   return isRuntimeStale(state)
 }
 
-export function selectPaneRuntimeSession(pane: EditorPaneId) {
-  return (state: RuntimeState) => state.paneSessions[pane]
+export function selectTabRuntimeSession(path: string | null | undefined) {
+  return (state: RuntimeState) => getTabSession(state, path)
 }
 
 function syncVisibleRuntimeFromPane(
@@ -379,7 +394,8 @@ function syncVisibleRuntimeFromPane(
   get: () => RuntimeState,
   pane: EditorPaneId,
 ) {
-  const session = get().paneSessions[pane]
+  const activePath = getPaneActivePath(pane)
+  const session = getTabSession(get(), activePath)
   set({
     activeRuntimePane: pane,
     language: session.language,
@@ -394,49 +410,36 @@ function syncVisibleRuntimeFromPane(
   })
 }
 
-function updatePaneSession(
+function updateTabSession(
   set: (partial: Partial<RuntimeState>) => void,
   get: () => RuntimeState,
-  pane: EditorPaneId,
-  patch: Partial<PaneRuntimeSession>,
+  filePath: string,
+  patch: Partial<TabRuntimeSession>,
 ) {
   const next = {
-    ...get().paneSessions[pane],
+    ...getTabSession(get(), filePath),
     ...patch,
   }
 
   set({
-    paneSessions: {
-      ...get().paneSessions,
-      [pane]: next,
+    tabSessions: {
+      ...get().tabSessions,
+      [filePath]: next,
     },
   })
 
-  if (get().activeRuntimePane === pane) {
-    syncVisibleRuntimeFromPane(set, get, pane)
-  }
-}
-
-function findRuntimeHandleForTarget(targetUrl: string): LocalRuntimeHandle | null {
-  const normalized = targetUrl.trim()
-  const panes: EditorPaneId[] = ['primary', 'secondary', 'tertiary']
-  for (const pane of panes) {
-    const handle = runtimeHandles[pane]
-    if (!handle) continue
-    if (normalized === handle.connectionUrl || normalized === `css://${handle.serverName}`) {
-      return handle
+  const workspace = useWorkspaceStore.getState()
+  for (const pane of ['primary', 'secondary', 'tertiary'] as EditorPaneId[]) {
+    const panePath = workspace.paneTabs[pane].activePath ?? workspace.paneTabs[pane].tabs[0] ?? null
+    if (panePath === filePath || (pane === get().activeRuntimePane && panePath)) {
+      syncVisibleRuntimeFromPane(set, get, pane)
     }
   }
-  return null
 }
 
 export const useRuntimeStore = create<RuntimeState>()((set, get) => ({
   activeRuntimePane: 'primary',
-  paneSessions: {
-    primary: createEmptyPaneSession(),
-    secondary: createEmptyPaneSession(),
-    tertiary: createEmptyPaneSession(),
-  },
+  tabSessions: {},
   language: null,
   status: 'idle',
   launchable: false,
@@ -468,8 +471,14 @@ export const useRuntimeStore = create<RuntimeState>()((set, get) => ({
     const targetFile = filePath ? workspace.files.find((file) => file.path === filePath) ?? null : null
 
     if (!targetFile) {
-      updatePaneSession(set, get, pane, {
-        mode: 'idle',
+      if (filePath) {
+        updateTabSession(set, get, filePath, {
+          mode: 'idle',
+          status: 'error',
+          errorMessage: 'No file is open in this pane',
+        })
+      }
+      set({
         status: 'error',
         errorMessage: 'No file is open in this pane',
       })
@@ -480,7 +489,7 @@ export const useRuntimeStore = create<RuntimeState>()((set, get) => ({
     syncVisibleRuntimeFromPane(set, get, pane)
 
     if (targetFile.name.startsWith('server')) {
-      updatePaneSession(set, get, pane, {
+      updateTabSession(set, get, targetFile.path, {
         mode: 'server',
         language: workspace.sample.serverLanguage,
         status: 'starting',
@@ -500,27 +509,28 @@ export const useRuntimeStore = create<RuntimeState>()((set, get) => ({
       })
 
       try {
-        if (runtimeHandles[pane]) {
-          await runtimeHandles[pane]?.stop()
-          runtimeHandles[pane] = null
+        const existingHandle = runtimeHandles.get(targetFile.path)
+        if (existingHandle) {
+          await existingHandle.handle.stop()
+          runtimeHandles.delete(targetFile.path)
         }
 
         const handle = workspace.sample.serverLanguage === 'typescript'
           ? await startLocalTsRuntime({
               source: targetFile.content,
-              serverName: `${workspace.sample.id}-${pane}`,
+              serverName: `${workspace.sample.id}-${pane}-${targetFile.name.replace(/[^a-zA-Z0-9_-]/g, '-')}`,
               onRequest: (direction, payload) => {
-                recordRuntimeTelemetry(set, get, pane, direction, payload)
+                recordRuntimeTelemetry(set, get, targetFile.path, pane, direction, payload)
               },
             })
           : await startPythonRuntime({
               source: targetFile.content,
-              serverName: `${workspace.sample.id}-${pane}`,
+              serverName: `${workspace.sample.id}-${pane}-${targetFile.name.replace(/[^a-zA-Z0-9_-]/g, '-')}`,
             })
-        runtimeHandles[pane] = handle
+        runtimeHandles.set(targetFile.path, { pane, handle })
         playgroundClient = null
 
-        updatePaneSession(set, get, pane, {
+        updateTabSession(set, get, targetFile.path, {
           mode: 'server',
           language: handle.language,
           status: 'running',
@@ -560,8 +570,8 @@ export const useRuntimeStore = create<RuntimeState>()((set, get) => ({
         console.error('Error constructor:', error?.constructor?.name)
         console.error('Error message:', (error as any)?.message)
         console.error('Error stack:', (error as any)?.stack)
-        runtimeHandles[pane] = null
-        updatePaneSession(set, get, pane, {
+        runtimeHandles.delete(targetFile.path)
+        updateTabSession(set, get, targetFile.path, {
           mode: 'server',
           language: workspace.sample.serverLanguage,
           status: 'error',
@@ -598,13 +608,11 @@ export const useRuntimeStore = create<RuntimeState>()((set, get) => ({
       return
     }
 
-    const availableHandle = runtimeHandles[pane]
-      ?? runtimeHandles.primary
-      ?? runtimeHandles.secondary
-      ?? runtimeHandles.tertiary
+    const availableHandle = runtimeHandles.get(targetFile.path)?.handle
+      ?? Array.from(runtimeHandles.values())[0]?.handle
 
     if (!availableHandle) {
-      updatePaneSession(set, get, pane, {
+      updateTabSession(set, get, targetFile.path, {
         mode: 'client',
         status: 'error',
         errorMessage: 'Start a server pane before running a client pane',
@@ -619,7 +627,7 @@ export const useRuntimeStore = create<RuntimeState>()((set, get) => ({
       return
     }
 
-    updatePaneSession(set, get, pane, {
+    updateTabSession(set, get, targetFile.path, {
       mode: 'client',
       status: 'starting',
       errorMessage: null,
@@ -651,7 +659,7 @@ export const useRuntimeStore = create<RuntimeState>()((set, get) => ({
       const endedAt = Date.now()
       const nextRecentClientTargets = [targetUrl, ...get().recentClientTargets.filter((entry) => entry !== targetUrl)].slice(0, 8)
       persistRecentClientTargets(nextRecentClientTargets)
-      updatePaneSession(set, get, pane, {
+      updateTabSession(set, get, targetFile.path, {
         mode: 'client',
         status: 'idle',
         errorMessage: null,
@@ -678,7 +686,7 @@ export const useRuntimeStore = create<RuntimeState>()((set, get) => ({
         recentClientTargets: nextRecentClientTargets,
       })
     } catch (error) {
-      updatePaneSession(set, get, pane, {
+      updateTabSession(set, get, targetFile.path, {
         mode: 'client',
         status: 'error',
         errorMessage: error instanceof Error ? error.message : String(error),
@@ -703,36 +711,12 @@ export const useRuntimeStore = create<RuntimeState>()((set, get) => ({
     }
   },
   stopPane: async (pane) => {
-    if (runtimeHandles[pane]) {
-      await runtimeHandles[pane]?.stop()
-      runtimeHandles[pane] = null
-    }
-    pendingServerRequests[pane]?.clear()
+    const path = getPaneActivePath(pane)
+    if (!path) return
+    await get().stopTabByPath(path)
 
-    updatePaneSession(set, get, pane, createEmptyPaneSession())
     if (get().activeRuntimePane === pane) {
-      set({
-        language: null,
-        status: 'idle',
-        launchable: false,
-        launchNote: null,
-        launchedServerFilePath: null,
-        launchedServerUpdatedAt: null,
-        connectionUrl: null,
-        serverName: null,
-        diagnostics: [],
-        compiledCode: '',
-        analysisSummary: [],
-        openapiDocument: null,
-        operations: [],
-        invocationDrafts: {},
-        logs: [],
-        requests: [],
-        highlightedHandler: null,
-        activeRequestId: null,
-        clientRun: null,
-        errorMessage: null,
-      })
+      syncVisibleRuntimeFromPane(set, get, pane)
     }
 
     set({
@@ -741,6 +725,22 @@ export const useRuntimeStore = create<RuntimeState>()((set, get) => ({
         ...get().logs,
       ],
     })
+  },
+  stopTabByPath: async (path) => {
+    const binding = runtimeHandles.get(path)
+    if (binding) {
+      await binding.handle.stop()
+      runtimeHandles.delete(path)
+    }
+    pendingServerRequests.get(path)?.clear()
+    pendingServerRequests.delete(path)
+    updateTabSession(set, get, path, createEmptyTabSession())
+  },
+  isTabRunning: (path) => {
+    const session = get().tabSessions[path]
+    if (!session) return false
+    if (session.mode !== 'server') return false
+    return session.status === 'running' || session.status === 'starting'
   },
   startCurrentServer: async () => {
     await get().runPane(useWorkspaceStore.getState().activeEditorPane)

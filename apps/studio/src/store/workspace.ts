@@ -8,7 +8,6 @@ import {
 } from '@browserver/storage'
 import { samples, type Sample, type SampleFile } from '../samples'
 import { useHistoryStore } from './history'
-import { commitWorkspace } from './git'
 import { useLayoutStore } from './layout'
 import { useThemeStore } from '../theme'
 
@@ -491,9 +490,13 @@ function queueSave(
   if (existing) window.clearTimeout(existing)
 
   const timeout = window.setTimeout(() => {
-    void saveWorkspaceSnapshot(snapshot).then(() => {
-      clearDirty()
-    })
+    void saveWorkspaceSnapshot(snapshot)
+      .then(() => {
+        clearDirty()
+      })
+      .catch((error) => {
+        console.error('Workspace snapshot save failed', error)
+      })
     saveTimers.delete(snapshot.id)
   }, 250)
 
@@ -973,6 +976,7 @@ export function parseBrowserYaml(content: string): any {
 export const useWorkspaceStore = create<WorkspaceState>()((set, get) => ({
   syncBrowserYaml: () => {
     const state = get()
+    if (!state.hydrated) return
     const name = '.browserver.yaml'
     const path = toPath(state.sample.id, name)
     if (state.dirtyFilePaths.includes(path)) return
@@ -989,9 +993,17 @@ export const useWorkspaceStore = create<WorkspaceState>()((set, get) => ({
       const rtState = useRuntimeStore.getState()
       const runningServers: Partial<Record<EditorPaneId, string>> = {}
       for (const pane of ['primary', 'secondary', 'tertiary'] as EditorPaneId[]) {
-        const ps = rtState.paneSessions[pane]
-        if (ps.mode === 'server' && ps.status === 'running' && ps.launchedFilePath) {
-          runningServers[pane] = ps.launchedFilePath
+        const paneState = state.paneTabs[pane]
+        const preferred = paneState.activePath
+        const orderedPaths = preferred
+          ? [preferred, ...paneState.tabs.filter((path) => path !== preferred)]
+          : [...paneState.tabs]
+        const runningPath = orderedPaths.find((path) => {
+          const session = rtState.tabSessions[path]
+          return session?.mode === 'server' && session.status === 'running'
+        })
+        if (runningPath) {
+          runningServers[pane] = runningPath
         }
       }
       if (Object.keys(runningServers).length > 0) {
@@ -1942,6 +1954,10 @@ export const useWorkspaceStore = create<WorkspaceState>()((set, get) => ({
     const state = get()
     const file = state.files.find(f => f.path === path)
     if (!file) return
+    if (!state.dirtyFilePaths.includes(path)) {
+      // No content diff for this file; avoid no-op snapshot/history writes.
+      return
+    }
 
     if (file.name === '.browserver.yaml') {
       try {
@@ -1965,17 +1981,31 @@ export const useWorkspaceStore = create<WorkspaceState>()((set, get) => ({
       }
     }
 
+    const history = useHistoryStore.getState()
+    const historyLabel = message || `Save ${file.name}`
+    history.begin(historyLabel)
+
+    // Push save action into history immediately for responsive UI feedback.
+    try {
+      await history.commit(state.sample.id)
+    } catch (error) {
+      console.error('History commit failed on save', error)
+      history.abort()
+    }
+
     set({ saveState: 'saving' })
     const snapshot = currentSnapshot(get())
-    await saveWorkspaceSnapshot(snapshot)
-    
-    // Git commit for every save
     try {
-      await commitWorkspace(state.sample.id, state.files.map(f => ({ path: f.path, content: f.content })), message || `Save ${file.name}`)
-    } catch (e) {
-      console.error('Git commit failed', e)
+      await saveWorkspaceSnapshot(snapshot)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      console.error('Workspace snapshot save failed', error)
+      set({ saveState: 'idle', saveError: message })
+      window.alert(`Failed to save workspace snapshot: ${message}`)
+      return
     }
     
+
     set((s) => ({
       dirtyFilePaths: s.dirtyFilePaths.filter((p) => p !== path),
       saveState: 'saved',

@@ -24,7 +24,7 @@ import { layoutPresets, useLayoutStore } from './store/layout'
 import { useRuntimeStore } from './store/runtime'
 import { useTrustStore } from './store/trust'
 import { themes, useThemeStore, applyCssVariables, applyMonacoTheme } from './theme'
-import { editorViewDefinitions, getEditorItemLabel, parseBrowserYaml, useWorkspaceStore, type EditorPaneId, type EditorViewId } from './store/workspace'
+import { editorViewDefinitions, getEditorItemLabel, getEditorViewId, parseBrowserYaml, useWorkspaceStore, type EditorPaneId, type EditorViewId } from './store/workspace'
 
 interface PendingExternalImport {
   files: File[]
@@ -40,6 +40,11 @@ interface PendingArchiveImport {
   files: File[]
   pane: EditorPaneId
   folderName: string | null
+}
+
+interface PendingRunningTabClose {
+  path: string
+  remainingPaths: string[]
 }
 
 function baseName(path: string): string {
@@ -280,6 +285,7 @@ export function App() {
   const [dragCursor, setDragCursor] = useState({ x: 0, y: 0 })
   const [pendingExternalImport, setPendingExternalImport] = useState<PendingExternalImport | null>(null)
   const [pendingArchiveImport, setPendingArchiveImport] = useState<PendingArchiveImport | null>(null)
+  const [pendingRunningTabClose, setPendingRunningTabClose] = useState<PendingRunningTabClose | null>(null)
   const [externalFileDragActive, setExternalFileDragActive] = useState(false)
   const sidebarWidth = useLayoutStore((state) => state.sidebarWidth)
   const bottomHeight = useLayoutStore((state) => state.bottomHeight)
@@ -298,6 +304,9 @@ export function App() {
   const splitFileToPane = useWorkspaceStore((state) => state.splitFileToPane)
   const openEditorView = useWorkspaceStore((state) => state.openEditorView)
   const reorderOpenFile = useWorkspaceStore((state) => state.reorderOpenFile)
+  const setActiveFile = useWorkspaceStore((state) => state.setActiveFile)
+  const closeFile = useWorkspaceStore((state) => state.closeFile)
+  const closePaths = useWorkspaceStore((state) => state.closePaths)
   const hydrate = useWorkspaceStore((state) => state.hydrate)
   const hydrated = useWorkspaceStore((state) => state.hydrated)
   const sample = useWorkspaceStore((state) => state.sample)
@@ -325,6 +334,8 @@ export function App() {
   const stopServer = useRuntimeStore((state) => state.stopServer)
   const runClientFile = useRuntimeStore((state) => state.runClientFile)
   const runPane = useRuntimeStore((state) => state.runPane)
+  const stopTabByPath = useRuntimeStore((state) => state.stopTabByPath)
+  const isTabRunning = useRuntimeStore((state) => state.isTabRunning)
   const runtimeStatus = useRuntimeStore((state) => state.status)
   const themeId = useThemeStore((state) => state.themeId)
   const applyThemeId = useThemeStore((state) => state.applyThemeId)
@@ -488,6 +499,49 @@ export function App() {
     )
     setPendingExternalImport(null)
   }
+
+  const requestClosePaths = useCallback((paths: string[]) => {
+    const uniquePaths = Array.from(new Set(paths.filter(Boolean)))
+    if (uniquePaths.length === 0) return
+    const runningPath = uniquePaths.find((path) => isTabRunning(path))
+    if (runningPath) {
+      setPendingRunningTabClose({
+        path: runningPath,
+        remainingPaths: uniquePaths.filter((path) => path !== runningPath),
+      })
+      return
+    }
+
+    if (uniquePaths.length === 1) {
+      closeFile(uniquePaths[0])
+      return
+    }
+    closePaths(uniquePaths)
+  }, [closeFile, closePaths, isTabRunning])
+
+  const requestClosePath = useCallback((path: string) => {
+    requestClosePaths([path])
+  }, [requestClosePaths])
+
+  const closeRunningTabAndContinue = useCallback(async () => {
+    if (!pendingRunningTabClose) return
+    await stopTabByPath(pendingRunningTabClose.path)
+    closeFile(pendingRunningTabClose.path)
+    const remaining = pendingRunningTabClose.remainingPaths
+    setPendingRunningTabClose(null)
+    if (remaining.length > 0) {
+      requestClosePaths(remaining)
+    }
+  }, [closeFile, pendingRunningTabClose, requestClosePaths, stopTabByPath])
+
+  const leaveRunningTabOpenAndContinue = useCallback(() => {
+    if (!pendingRunningTabClose) return
+    const remaining = pendingRunningTabClose.remainingPaths
+    setPendingRunningTabClose(null)
+    if (remaining.length > 0) {
+      requestClosePaths(remaining)
+    }
+  }, [pendingRunningTabClose, requestClosePaths])
 
   const saveCheckpoint = async (name: string, note?: string) => {
     await createCheckpoint({
@@ -746,6 +800,7 @@ export function App() {
           const ws = useWorkspaceStore.getState()
           const fileExists = ws.files.some((f) => f.path === filePath)
           if (fileExists) {
+            setActiveFile(filePath, pane as EditorPaneId)
             void runPane(pane as EditorPaneId)
           }
         }
@@ -753,7 +808,7 @@ export function App() {
     } catch {
       // ignore parse errors
     }
-  }, [hydrated, files, runPane])
+  }, [hydrated, files, runPane, setActiveFile])
 
   useEffect(() => {
     void refreshProjects()
@@ -772,13 +827,16 @@ export function App() {
   }, [hydrateCheckpoints, sample.id])
 
   useEffect(() => {
-    void hydrateHistory(sample.id)
+    void hydrateHistory(sample.id).catch((error) => {
+      console.error('[history] hydrate failed', error)
+    })
   }, [hydrateHistory, sample.id])
 
   // Keep .browserver.yaml in sync with theme and layout changes
   useEffect(() => {
+    if (!hydrated) return
     syncBrowserYaml()
-  }, [syncBrowserYaml, themeId, sidebarWidth, bottomHeight, rightWidth, showSidebar, showBottom, showRight, runtimeStatus])
+  }, [hydrated, syncBrowserYaml, themeId, sidebarWidth, bottomHeight, rightWidth, showSidebar, showBottom, showRight, runtimeStatus])
 
   useEffect(() => {
     void refreshProjects()
@@ -845,6 +903,32 @@ export function App() {
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [openCommandPalette])
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      const key = event.key.toLowerCase()
+      const isMac = /mac/i.test(navigator.platform)
+      const saveCombo = key === 's' && (isMac ? event.metaKey : event.ctrlKey) && !event.shiftKey && !event.altKey
+      if (!saveCombo || event.repeat) return
+
+      event.preventDefault()
+      const ws = useWorkspaceStore.getState()
+      const paneActivePath = ws.paneTabs[ws.activeEditorPane].activePath
+      const targetPath = paneActivePath ?? ws.activeFilePath
+      console.log('[save] ctrl/cmd+s', {
+        source: 'window-keydown',
+        activeEditorPane: ws.activeEditorPane,
+        activeFilePath: ws.activeFilePath,
+        paneActivePath,
+        targetPath,
+      })
+      if (!targetPath || getEditorViewId(targetPath)) return
+      void ws.saveFile(targetPath)
+    }
+
+    window.addEventListener('keydown', onKeyDown, { capture: true })
+    return () => window.removeEventListener('keydown', onKeyDown, true)
+  }, [])
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -1048,6 +1132,8 @@ export function App() {
                         setDraggedEditorItem(null)
                         setHoveredDropPane(null)
                       }}
+                      onRequestClosePath={requestClosePath}
+                      onRequestClosePaths={requestClosePaths}
                     />
                   ) : null}
                   <div className="min-h-0 flex-1 bg-bs-bg-editor">
@@ -1085,6 +1171,8 @@ export function App() {
                         setDraggedEditorItem(null)
                         setHoveredDropPane(null)
                       }}
+                      onRequestClosePath={requestClosePath}
+                      onRequestClosePaths={requestClosePaths}
                     />
                   </div>
                 </div>
@@ -1168,6 +1256,36 @@ export function App() {
         </>
       </div>
       <CommandPalette commands={commands} />
+      <Modal
+        open={pendingRunningTabClose !== null}
+        title="Close Running Tab"
+        onClose={() => setPendingRunningTabClose(null)}
+        actions={(
+          <>
+            <button
+              onClick={leaveRunningTabOpenAndContinue}
+              className="rounded border border-bs-border bg-bs-bg-panel px-3 py-1 text-bs-text-muted hover:text-bs-text"
+            >
+              Leave Open and Running
+            </button>
+            <button
+              onClick={() => void closeRunningTabAndContinue()}
+              className="rounded bg-bs-accent px-3 py-1 text-bs-accent-text"
+            >
+              Stop and Close
+            </button>
+          </>
+        )}
+      >
+        {pendingRunningTabClose ? (
+          <div className="space-y-2 text-[12px] text-bs-text-muted">
+            <div>
+              <span className="text-bs-text">{getEditorItemLabel(pendingRunningTabClose.path, files, useWorkspaceStore.getState().viewTitles)}</span> is currently running.
+            </div>
+            <div>Choose whether to stop its runtime before closing this tab.</div>
+          </div>
+        ) : null}
+      </Modal>
       <Modal
         open={exportModalOpen}
         title="Export Project"

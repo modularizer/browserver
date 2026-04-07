@@ -15,7 +15,7 @@ import { SvgPreview, SvgToolbar, type SvgMode } from './SvgPane'
 import { MenuButton } from './MenuButton'
 import { Resizer } from './Resizer'
 import { useLayoutStore } from '../store/layout'
-import { selectPaneRuntimeSession, useRuntimeStore } from '../store/runtime'
+import { selectTabRuntimeSession, useRuntimeStore } from '../store/runtime'
 import {
   editorViewDefinitions,
   getEditorItemLabels,
@@ -135,6 +135,8 @@ export function Editor({
   onHoverDropPane,
   onLeaveDropPane,
   onDropToPane,
+  onRequestClosePath,
+  onRequestClosePaths,
 }: {
   onImportExternalFiles: (files: FileList | File[], pane: EditorPaneId, folderName?: string | null) => void
   onStartTabDrag: (path: string) => void
@@ -145,6 +147,8 @@ export function Editor({
   onHoverDropPane?: (pane: EditorPaneId) => void
   onLeaveDropPane?: () => void
   onDropToPane?: (pane: EditorPaneId) => void
+  onRequestClosePath: (path: string) => void
+  onRequestClosePaths: (paths: string[]) => void
 }) {
   const primaryContainerRef = useRef<HTMLDivElement>(null)
   const secondaryContainerRef = useRef<HTMLDivElement>(null)
@@ -173,14 +177,14 @@ export function Editor({
   const updateFileContent = useWorkspaceStore((state) => state.updateFileContent)
   const setActivePanel = useWorkspaceStore((state) => state.setActivePanel)
   const focusEditorPane = useWorkspaceStore((state) => state.focusEditorPane)
-  const assignFileToPane = useWorkspaceStore((state) => state.assignFileToPane)
   const openEditorView = useWorkspaceStore((state) => state.openEditorView)
   const focusPaneRuntime = useRuntimeStore((state) => state.focusPaneRuntime)
   const runPane = useRuntimeStore((state) => state.runPane)
   const stopPane = useRuntimeStore((state) => state.stopPane)
-  const primaryRuntime = useRuntimeStore(selectPaneRuntimeSession('primary'))
-  const secondaryRuntime = useRuntimeStore(selectPaneRuntimeSession('secondary'))
-  const tertiaryRuntime = useRuntimeStore(selectPaneRuntimeSession('tertiary'))
+  const primaryRuntime = useRuntimeStore(selectTabRuntimeSession(primaryPath))
+  const secondaryRuntime = useRuntimeStore(selectTabRuntimeSession(secondaryPath))
+  const tertiaryRuntime = useRuntimeStore(selectTabRuntimeSession(tertiaryPath))
+  const tabSessions = useRuntimeStore((state) => state.tabSessions)
   const highlightedHandler = useRuntimeStore((state) => state.highlightedHandler)
   const [paneModes, setPaneModes] = useState<Record<string, PaneSplitMode>>({})
   const setPaneMode = (path: string, mode: PaneSplitMode) => setPaneModes((prev) => ({ ...prev, [path]: mode }))
@@ -342,6 +346,9 @@ export function Editor({
             onStartTabDrag={onStartTabDrag}
             onEndTabDrag={onEndTabDrag}
             onReorderTab={onReorderTab}
+            tabSessions={tabSessions}
+            onRequestClosePath={onRequestClosePath}
+            onRequestClosePaths={onRequestClosePaths}
           />
         ) : undefined}
         active={activeEditorPane === 'primary'}
@@ -384,10 +391,12 @@ export function Editor({
                   runtime={secondaryView ? null : secondaryRuntime}
                   onRun={secondaryView ? undefined : () => void runPane('secondary')}
                   onStop={secondaryView ? undefined : () => void stopPane('secondary')}
-                  onClose={() => assignFileToPane('secondary', null)}
                   onStartTabDrag={onStartTabDrag}
                   onEndTabDrag={onEndTabDrag}
                   onReorderTab={onReorderTab}
+                  tabSessions={tabSessions}
+                  onRequestClosePath={onRequestClosePath}
+                  onRequestClosePaths={onRequestClosePaths}
                 />
               ) : dragPreviewActive ? (
                 <PreviewPaneHeader label="Pane 2" />
@@ -439,10 +448,12 @@ export function Editor({
                   runtime={tertiaryView ? null : tertiaryRuntime}
                   onRun={tertiaryView ? undefined : () => void runPane('tertiary')}
                   onStop={tertiaryView ? undefined : () => void stopPane('tertiary')}
-                  onClose={() => assignFileToPane('tertiary', null)}
                   onStartTabDrag={onStartTabDrag}
                   onEndTabDrag={onEndTabDrag}
                   onReorderTab={onReorderTab}
+                  tabSessions={tabSessions}
+                  onRequestClosePath={onRequestClosePath}
+                  onRequestClosePaths={onRequestClosePaths}
                 />
               ) : dragPreviewActive ? (
                 <PreviewPaneHeader label="Pane 3" />
@@ -542,6 +553,7 @@ export function Editor({
       const model = pane.editor?.getModel()
       if (!model) return
       const path = model.uri.path
+      console.log('[save] ctrl/cmd+s', { path, source: 'monaco-command' })
       void useWorkspaceStore.getState().saveFile(path)
     })
     pane.editor.onDidBlurEditorText(() => {
@@ -1076,23 +1088,27 @@ function PaneTabHeader({
   runtime,
   onRun,
   onStop,
-  onClose,
   onStartTabDrag,
   onEndTabDrag,
   onReorderTab,
+  tabSessions,
+  onRequestClosePath,
+  onRequestClosePaths,
 }: {
   paths: string[]
   activePath: string | null
   itemLabels: Record<string, string>
   active: boolean
   paneId: EditorPaneId
-  runtime: ReturnType<ReturnType<typeof selectPaneRuntimeSession>> | null
+  runtime: ReturnType<ReturnType<typeof selectTabRuntimeSession>> | null
   onRun?: () => void
   onStop?: () => void
-  onClose?: () => void
   onStartTabDrag: (path: string) => void
   onEndTabDrag: () => void
   onReorderTab: (path: string, beforePath: string) => void
+  tabSessions: Record<string, { mode: 'idle' | 'server' | 'client'; status: 'idle' | 'starting' | 'running' | 'error' }>
+  onRequestClosePath: (path: string) => void
+  onRequestClosePaths: (paths: string[]) => void
 }) {
   const rootRef = useRef<HTMLDivElement>(null)
   const pendingDragRef = useRef<{
@@ -1115,8 +1131,6 @@ function PaneTabHeader({
   const openEditorView = useWorkspaceStore((state) => state.openEditorView)
   const createFile = useWorkspaceStore((state) => state.createFile)
   const setActiveFile = useWorkspaceStore((state) => state.setActiveFile)
-  const closeFile = useWorkspaceStore((state) => state.closeFile)
-  const closePaths = useWorkspaceStore((state) => state.closePaths)
   const assignFileToPane = useWorkspaceStore((state) => state.assignFileToPane)
   const splitFileToPane = useWorkspaceStore((state) => state.splitFileToPane)
   const isRunning = runtime?.mode === 'server' && (runtime.status === 'running' || runtime.status === 'starting')
@@ -1276,7 +1290,7 @@ function PaneTabHeader({
         id: 'close.current',
         label: 'Close',
         run: () => {
-          closeFile(path)
+          onRequestClosePath(path)
           setContextMenu(null)
         },
       })
@@ -1284,7 +1298,7 @@ function PaneTabHeader({
         id: 'close.all',
         label: 'Close All',
         run: () => {
-          closePaths(paths)
+          onRequestClosePaths(paths)
           setContextMenu(null)
         },
       })
@@ -1292,7 +1306,7 @@ function PaneTabHeader({
         id: 'close.others',
         label: 'Close Others',
         run: () => {
-          closePaths(paths.filter((entry) => entry !== path))
+          onRequestClosePaths(paths.filter((entry) => entry !== path))
           setContextMenu(null)
         },
       })
@@ -1300,7 +1314,7 @@ function PaneTabHeader({
         id: 'close.left',
         label: 'Close Tabs To Left',
         run: () => {
-          closePaths(paths.slice(0, index))
+          onRequestClosePaths(paths.slice(0, index))
           setContextMenu(null)
         },
       })
@@ -1308,14 +1322,14 @@ function PaneTabHeader({
         id: 'close.right',
         label: 'Close Tabs To Right',
         run: () => {
-          closePaths(paths.slice(index + 1))
+          onRequestClosePaths(paths.slice(index + 1))
           setContextMenu(null)
         },
       })
     }
 
     return actions
-  }, [assignFileToPane, closeFile, closePaths, contextMenu, paneId, paths, splitFileToPane])
+  }, [assignFileToPane, contextMenu, onRequestClosePath, onRequestClosePaths, paneId, paths, splitFileToPane])
 
   return (
     <div ref={rootRef} className="flex h-[30px] items-stretch justify-between overflow-hidden bg-bs-bg-panel px-2">
@@ -1387,12 +1401,12 @@ function PaneTabHeader({
                 {dirtyFilePaths.includes(path) ? (
                   <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-bs-text-faint" aria-hidden="true" />
                 ) : null}
-                {isTabActive && runtime ? (
+                {!getEditorViewId(path) ? (
                   <span
                     className={`h-1.5 w-1.5 rounded-full ${
-                      isRunning
+                      tabSessions[path]?.mode === 'server' && (tabSessions[path]?.status === 'running' || tabSessions[path]?.status === 'starting')
                         ? 'bg-bs-good'
-                        : runtime.status === 'error'
+                        : tabSessions[path]?.status === 'error'
                           ? 'bg-bs-error'
                           : 'bg-bs-text-faint'
                     }`}
@@ -1400,22 +1414,16 @@ function PaneTabHeader({
                   />
                 ) : null}
                 <span className="truncate">{title}</span>
-                {paths.length > 1 || onClose ? (
-                  <button
-                    onClick={(event) => {
-                      event.stopPropagation()
-                      if (path === activePath && onClose && paths.length === 1) {
-                        onClose()
-                      } else {
-                        closeFile(path)
-                      }
-                    }}
-                    className="text-bs-text-faint hover:text-bs-text"
-                    aria-label={`Close ${title}`}
-                  >
-                    ×
-                  </button>
-                ) : null}
+                <button
+                  onClick={(event) => {
+                    event.stopPropagation()
+                    onRequestClosePath(path)
+                  }}
+                  className="text-bs-text-faint hover:text-bs-text"
+                  aria-label={`Close ${title}`}
+                >
+                  ×
+                </button>
               </div>
             )
           })}

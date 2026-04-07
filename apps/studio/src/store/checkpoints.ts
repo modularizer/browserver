@@ -31,8 +31,9 @@ interface CheckpointState {
 }
 
 const DB_NAME = 'browserver-history'
-const DB_VERSION = 1
+const DB_VERSION = 4
 const CHECKPOINTS_STORE = 'projectCheckpoints'
+const TX_STORE = 'transactions'
 
 async function openDatabase(): Promise<IDBDatabase> {
   return await new Promise((resolve, reject) => {
@@ -40,11 +41,40 @@ async function openDatabase(): Promise<IDBDatabase> {
 
     request.onupgradeneeded = () => {
       const db = request.result
+
+      if (!db.objectStoreNames.contains(TX_STORE)) {
+        const txStore = db.createObjectStore(TX_STORE, { keyPath: 'id' })
+        txStore.createIndex('workspaceId_ts', ['workspaceId', 'ts'], { unique: false })
+      } else {
+        const tx = request.transaction
+        if (tx) {
+          const txStore = tx.objectStore(TX_STORE)
+          if (!txStore.indexNames.contains('workspaceId_ts')) {
+            txStore.createIndex('workspaceId_ts', ['workspaceId', 'ts'], { unique: false })
+          }
+        }
+      }
+
       if (!db.objectStoreNames.contains(CHECKPOINTS_STORE)) {
         const store = db.createObjectStore(CHECKPOINTS_STORE, { keyPath: 'id' })
         store.createIndex('workspaceId', 'workspaceId', { unique: false })
         store.createIndex('createdAt', 'createdAt', { unique: false })
+      } else {
+        const tx = request.transaction
+        if (tx) {
+          const store = tx.objectStore(CHECKPOINTS_STORE)
+          if (!store.indexNames.contains('workspaceId')) {
+            store.createIndex('workspaceId', 'workspaceId', { unique: false })
+          }
+          if (!store.indexNames.contains('createdAt')) {
+            store.createIndex('createdAt', 'createdAt', { unique: false })
+          }
+        }
       }
+    }
+
+    request.onblocked = () => {
+      reject(new Error('History DB upgrade blocked. Close other browserver tabs and retry.'))
     }
 
     request.onsuccess = () => resolve(request.result)

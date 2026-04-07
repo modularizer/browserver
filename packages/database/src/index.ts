@@ -23,7 +23,7 @@ export interface DatabaseSnapshot {
 }
 
 const DB_NAME = 'browserver'
-const DB_VERSION = 2
+const DB_VERSION = 4
 const DATABASE_STORE = 'workspaceDatabases'
 const SNAPSHOT_STORE = 'workspaceSnapshots'
 
@@ -42,7 +42,15 @@ async function openDatabase(): Promise<IDBDatabase> {
       }
     }
 
-    request.onsuccess = () => resolve(request.result)
+    request.onblocked = () => {
+      reject(new Error('IndexedDB upgrade blocked. Close other browserver tabs and retry.'))
+    }
+
+    request.onsuccess = () => {
+      const db = request.result
+      db.onversionchange = () => db.close()
+      resolve(db)
+    }
     request.onerror = () => reject(request.error ?? new Error('Failed to open IndexedDB'))
   })
 }

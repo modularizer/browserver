@@ -50,6 +50,39 @@ html, body, #root {
   display: none;
 }
 
+.bs-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--bs-accent) 48%, transparent) color-mix(in srgb, var(--bs-bg-panel) 92%, transparent);
+}
+
+.bs-scrollbar::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+.bs-scrollbar::-webkit-scrollbar-track {
+  background: color-mix(in srgb, var(--bs-bg-panel) 92%, transparent);
+  border-radius: 999px;
+}
+
+.bs-scrollbar::-webkit-scrollbar-thumb {
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--bs-accent) 70%, transparent),
+    color-mix(in srgb, var(--bs-border-focus) 76%, transparent)
+  );
+  border-radius: 999px;
+  border: 2px solid color-mix(in srgb, var(--bs-bg-panel) 92%, transparent);
+}
+
+.bs-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--bs-accent-hover) 78%, transparent),
+    color-mix(in srgb, var(--bs-accent) 88%, transparent)
+  );
+}
+
 body {
   font-family: ui-sans-serif, system-ui, sans-serif;
 }

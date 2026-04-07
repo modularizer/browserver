@@ -13,6 +13,8 @@ interface TxRecord {
 }
 
 interface HistoryState {
+  hydratedWorkspaceId: string | null
+  gitCommitRevision: number
   // per-workspace list
   items: TxRecord[]
   // pointer points to index of last-applied transaction; -1 means base state before any tx
@@ -30,8 +32,9 @@ interface HistoryState {
 
 // IndexedDB persistence (simple, single store)
 const DB_NAME = 'browserver-history'
-const DB_VERSION = 2
+const DB_VERSION = 4
 const TX_STORE = 'transactions'
+const CHECKPOINTS_STORE = 'projectCheckpoints'
 
 async function openDb(): Promise<IDBDatabase> {
   return await new Promise((resolve, reject) => {
@@ -41,8 +44,23 @@ async function openDb(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains(TX_STORE)) {
         const store = db.createObjectStore(TX_STORE, { keyPath: 'id' })
         store.createIndex('workspaceId_ts', ['workspaceId', 'ts'], { unique: false })
+      } else {
+        const tx = req.transaction
+        if (tx) {
+          const store = tx.objectStore(TX_STORE)
+          if (!store.indexNames.contains('workspaceId_ts')) {
+            store.createIndex('workspaceId_ts', ['workspaceId', 'ts'], { unique: false })
+          }
+        }
+      }
+
+      if (!db.objectStoreNames.contains(CHECKPOINTS_STORE)) {
+        const checkpointsStore = db.createObjectStore(CHECKPOINTS_STORE, { keyPath: 'id' })
+        checkpointsStore.createIndex('workspaceId', 'workspaceId', { unique: false })
+        checkpointsStore.createIndex('createdAt', 'createdAt', { unique: false })
       }
     }
+    req.onblocked = () => reject(new Error('History DB upgrade blocked. Close other browserver tabs and retry.'))
     req.onsuccess = () => resolve(req.result)
     req.onerror = () => reject(req.error ?? new Error('Failed to open history DB'))
   })
@@ -124,6 +142,8 @@ async function restore(state: { workspace: WorkspaceSnapshot; session: Workspace
 }
 
 export const useHistoryStore = create<HistoryState>()((set, get) => ({
+  hydratedWorkspaceId: null,
+  gitCommitRevision: 0,
   items: [],
   pointer: -1,
   reentrant: false,
@@ -139,8 +159,13 @@ export const useHistoryStore = create<HistoryState>()((set, get) => ({
       }
     }
     const items = await loadTransactions(workspaceId)
+    const current = get()
+    const merged = current.hydratedWorkspaceId === workspaceId
+      ? Array.from(new Map([...items, ...current.items].map((entry) => [entry.id, entry])).values())
+          .sort((a, b) => a.ts - b.ts)
+      : items
     // pointer to end (assume latest applied)
-    set({ items, pointer: items.length - 1 })
+    set({ hydratedWorkspaceId: workspaceId, items: merged, pointer: merged.length - 1 })
   },
   begin: (label: string) => {
     if (get().reentrant) return
@@ -152,15 +177,6 @@ export const useHistoryStore = create<HistoryState>()((set, get) => ({
     const pending = get().pending
     if (!pending) return
     const post = capture()
-
-    // Create a real Git commit representing the post state working tree.
-    const files = post.workspace.files.map(f => ({ path: f.path, content: f.content }))
-    try {
-      await commitWorkspace(workspaceId, files, pending.label)
-    } catch (err) {
-      // Non-fatal: continue storing app-level tx even if git commit fails
-      console.warn('Git commit failed:', err)
-    }
 
     const rec: TxRecord = {
       id: crypto.randomUUID(),
@@ -174,8 +190,25 @@ export const useHistoryStore = create<HistoryState>()((set, get) => ({
     const { items, pointer } = get()
     const kept = pointer < items.length - 1 ? items.slice(0, pointer + 1) : items
     const nextItems = [...kept, rec]
-    await saveTransaction(rec)
-    set({ items: nextItems, pointer: nextItems.length - 1, pending: null })
+    set({ hydratedWorkspaceId: workspaceId, items: nextItems, pointer: nextItems.length - 1, pending: null })
+
+    if (pending.label.toLowerCase().startsWith('save ')) {
+      console.log('[history] added entry immediately', { workspaceId, label: pending.label, id: rec.id })
+    }
+
+    try {
+      await saveTransaction(rec)
+    } catch (error) {
+      console.error('[history] failed to persist transaction', error)
+    }
+
+    // Git commit is secondary: keep UI/history responsive even if git is slow.
+    const files = post.workspace.files.map(f => ({ path: f.path, content: f.content }))
+    void commitWorkspace(workspaceId, files, pending.label).catch((err) => {
+      console.warn('Git commit failed:', err)
+    }).then(() => {
+      set((state) => ({ gitCommitRevision: state.gitCommitRevision + 1 }))
+    })
   },
   abort: () => set({ pending: null }),
   undo: async () => {
