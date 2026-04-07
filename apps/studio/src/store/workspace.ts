@@ -1928,7 +1928,20 @@ export const useWorkspaceStore = create<WorkspaceState>()((set, get) => ({
       })
       return { activeRightPanelTab: tab }
     }),
-  updateFileContent: (path: string, content: string) =>
+  updateFileContent: (path: string, content: string) => {
+    const current = get()
+    const targetFile = current.files.find((file) => file.path === path)
+    if (!targetFile || targetFile.content === content) return
+
+    const wasDirty = current.dirtyFilePaths.includes(path)
+    if (!wasDirty) {
+      const history = useHistoryStore.getState()
+      if (!history.pending) {
+        // Capture pre-edit workspace state so save transactions produce meaningful line diffs.
+        history.begin(`Save ${targetFile.name}`)
+      }
+    }
+
     set((state) => {
       const files = state.files.map((file) =>
         file.path === path ? { ...file, content, updatedAt: Date.now() } : file,
@@ -1949,7 +1962,8 @@ export const useWorkspaceStore = create<WorkspaceState>()((set, get) => ({
         sample,
         dirtyFilePaths: nextDirtyFilePaths,
       }
-    }),
+    })
+  },
   saveFile: async (path: string, message?: string) => {
     const state = get()
     const file = state.files.find(f => f.path === path)
@@ -1982,8 +1996,10 @@ export const useWorkspaceStore = create<WorkspaceState>()((set, get) => ({
     }
 
     const history = useHistoryStore.getState()
-    const historyLabel = message || `Save ${file.name}`
-    history.begin(historyLabel)
+    if (!history.pending) {
+      const historyLabel = message || `Save ${file.name}`
+      history.begin(historyLabel)
+    }
 
     // Push save action into history immediately for responsive UI feedback.
     try {

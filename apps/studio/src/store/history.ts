@@ -12,23 +12,37 @@ interface TxRecord {
   post: { workspace: WorkspaceSnapshot; session: WorkspaceEditorSession }
 }
 
-interface HistoryState {
-  hydratedWorkspaceId: string | null
-  gitCommitRevision: number
-  // per-workspace list
-  items: TxRecord[]
-  // pointer points to index of last-applied transaction; -1 means base state before any tx
-  pointer: number
-  reentrant: boolean
-  pending: { label: string; pre: { workspace: WorkspaceSnapshot; session: WorkspaceEditorSession } } | null
-  hydrate: (workspaceId: string) => Promise<void>
-  begin: (label: string) => void
-  commit: (workspaceId: string) => Promise<void>
-  abort: () => void
-  undo: () => Promise<void>
-  redo: () => Promise<void>
-  clear: () => Promise<void>
+function fileContentAtPath(snapshot: WorkspaceSnapshot, path: string): string | null {
+  const match = snapshot.files.find((file) => file.path === path)
+  return match ? match.content : null
 }
+
+export function transactionTouchesFilePath(entry: TxRecord, path: string): boolean {
+  const pre = fileContentAtPath(entry.pre.workspace, path)
+  const post = fileContentAtPath(entry.post.workspace, path)
+  if (pre === null && post === null) return false
+  return pre !== post
+}
+
+interface HistoryState {
+   hydratedWorkspaceId: string | null
+   gitCommitRevision: number
+   // per-workspace list
+   items: TxRecord[]
+   // pointer points to index of last-applied transaction; -1 means base state before any tx
+   pointer: number
+   reentrant: boolean
+   pending: { label: string; pre: { workspace: WorkspaceSnapshot; session: WorkspaceEditorSession } } | null
+   hydrate: (workspaceId: string) => Promise<void>
+   begin: (label: string) => void
+   commit: (workspaceId: string) => Promise<void>
+   abort: () => void
+   undo: () => Promise<void>
+   redo: () => Promise<void>
+   clear: () => Promise<void>
+   squashTransactions: (ids: string[]) => Promise<boolean>
+   renameTransaction: (id: string, newLabel: string) => Promise<boolean>
+ }
 
 // IndexedDB persistence (simple, single store)
 const DB_NAME = 'browserver-history'
@@ -84,14 +98,31 @@ async function loadTransactions(workspaceId: string): Promise<TxRecord[]> {
 }
 
 async function saveTransaction(rec: TxRecord): Promise<void> {
-  const db = await openDb()
-  await new Promise<void>((resolve, reject) => {
-    const tx = db.transaction(TX_STORE, 'readwrite')
-    tx.objectStore(TX_STORE).put(rec)
-    tx.oncomplete = () => { db.close(); resolve() }
-    tx.onabort = () => reject(tx.error ?? new Error('IDB tx aborted'))
-  })
-}
+   const db = await openDb()
+   await new Promise<void>((resolve, reject) => {
+     const tx = db.transaction(TX_STORE, 'readwrite')
+     tx.objectStore(TX_STORE).put(rec)
+     tx.oncomplete = () => { db.close(); resolve() }
+     tx.onabort = () => reject(tx.error ?? new Error('IDB tx aborted'))
+   })
+ }
+
+async function updateTransaction(id: string, updates: Partial<TxRecord>): Promise<void> {
+   const db = await openDb()
+   await new Promise<void>((resolve, reject) => {
+     const tx = db.transaction(TX_STORE, 'readwrite')
+     const store = tx.objectStore(TX_STORE)
+     const getReq = store.get(id)
+     getReq.onsuccess = () => {
+       const record = getReq.result as TxRecord | undefined
+       if (record) {
+         store.put({ ...record, ...updates })
+       }
+     }
+     tx.oncomplete = () => { db.close(); resolve() }
+     tx.onabort = () => reject(tx.error ?? new Error('IDB tx aborted'))
+   })
+ }
 
 async function deleteTransactions(ids: string[]): Promise<void> {
   const db = await openDb()
@@ -99,6 +130,18 @@ async function deleteTransactions(ids: string[]): Promise<void> {
     const tx = db.transaction(TX_STORE, 'readwrite')
     const store = tx.objectStore(TX_STORE)
     for (const id of ids) store.delete(id)
+    tx.oncomplete = () => { db.close(); resolve() }
+    tx.onabort = () => reject(tx.error ?? new Error('IDB tx aborted'))
+  })
+}
+
+async function replaceTransactions(removeIds: string[], merged: TxRecord): Promise<void> {
+  const db = await openDb()
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(TX_STORE, 'readwrite')
+    const store = tx.objectStore(TX_STORE)
+    for (const id of removeIds) store.delete(id)
+    store.put(merged)
     tx.oncomplete = () => { db.close(); resolve() }
     tx.onabort = () => reject(tx.error ?? new Error('IDB tx aborted'))
   })
@@ -231,6 +274,88 @@ export const useHistoryStore = create<HistoryState>()((set, get) => ({
     await deleteTransactions(ids)
     set({ items: [], pointer: -1, pending: null })
   },
-}))
+   squashTransactions: async (ids) => {
+     const uniqueIds = Array.from(new Set(ids))
+     if (uniqueIds.length < 2) return false
+
+     const state = get()
+     if (state.pointer !== state.items.length - 1) {
+       return false
+     }
+
+     const indexById = new Map(state.items.map((item, index) => [item.id, index]))
+     const selectedIndexes = uniqueIds
+       .map((id) => indexById.get(id))
+       .filter((index): index is number => index !== undefined)
+       .sort((a, b) => a - b)
+
+     if (selectedIndexes.length < 2) return false
+
+     for (let i = 1; i < selectedIndexes.length; i += 1) {
+       if (selectedIndexes[i] !== selectedIndexes[i - 1] + 1) {
+         return false
+       }
+     }
+
+     const firstIndex = selectedIndexes[0]
+     const lastIndex = selectedIndexes[selectedIndexes.length - 1]
+     const selected = state.items.slice(firstIndex, lastIndex + 1)
+     if (selected.some((entry) => entry.workspaceId !== selected[0].workspaceId)) {
+       return false
+     }
+
+     const merged: TxRecord = {
+       id: crypto.randomUUID(),
+       workspaceId: selected[0].workspaceId,
+       label: selected[selected.length - 1].label,
+       ts: selected[selected.length - 1].ts,
+       pre: selected[0].pre,
+       post: selected[selected.length - 1].post,
+     }
+
+     const nextItems = [
+       ...state.items.slice(0, firstIndex),
+       merged,
+       ...state.items.slice(lastIndex + 1),
+     ]
+
+     try {
+       await replaceTransactions(selected.map((entry) => entry.id), merged)
+     } catch (error) {
+       console.error('[history] failed to persist squash', error)
+       return false
+     }
+
+     set({
+       hydratedWorkspaceId: merged.workspaceId,
+       items: nextItems,
+       pointer: nextItems.length - 1,
+     })
+     return true
+   },
+   renameTransaction: async (id, newLabel) => {
+     const state = get()
+     const itemIndex = state.items.findIndex((item) => item.id === id)
+     if (itemIndex === -1) return false
+
+     const record = state.items[itemIndex]
+     const updated = { ...record, label: newLabel }
+     const nextItems = [
+       ...state.items.slice(0, itemIndex),
+       updated,
+       ...state.items.slice(itemIndex + 1),
+     ]
+
+     try {
+       await updateTransaction(id, { label: newLabel })
+     } catch (error) {
+       console.error('[history] failed to persist rename', error)
+       return false
+     }
+
+     set({ items: nextItems })
+     return true
+   },
+ }))
 
 export type { TxRecord }

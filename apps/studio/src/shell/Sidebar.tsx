@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { selectActiveFile, useWorkspaceStore, type WorkspaceFile } from '../store/workspace'
 import { useLayoutStore } from '../store/layout'
-import { useHistoryStore } from '../store/history'
+import { transactionTouchesFilePath, useHistoryStore } from '../store/history'
 
 interface FolderNode {
   fullPath: string
@@ -112,6 +112,7 @@ export function Sidebar({
     x: number
     y: number
   } | null>(null)
+  const [historyScope, setHistoryScope] = useState<'all' | 'focused'>('all')
   const tree = useMemo(() => buildFolderTree(files, folders), [files, folders])
 
   useEffect(() => {
@@ -203,7 +204,19 @@ export function Sidebar({
   }, [workspaceId, historyHeight])
 
   const historyItems = useHistoryStore((s) => s.items)
+  const filteredHistoryItems = useMemo(() => {
+    if (historyScope === 'focused' && activeFile) {
+      return historyItems.filter((entry) => transactionTouchesFilePath(entry, activeFile.path))
+    }
+    return historyItems
+  }, [historyItems, historyScope, activeFile])
   const setActiveBottomPanel = useWorkspaceStore((s) => s.setActiveBottomPanel)
+
+  useEffect(() => {
+    if (historyScope === 'focused' && !activeFile) {
+      setHistoryScope('all')
+    }
+  }, [historyScope, activeFile])
 
   return (
     <div
@@ -475,21 +488,39 @@ export function Sidebar({
         />
         <div className="flex items-center justify-between px-3 py-1">
           <div className="text-[10px] font-semibold uppercase tracking-wider text-bs-text-faint">History</div>
-          <button
-            className="inline-flex h-5 items-center justify-center rounded px-1 text-[10px] text-bs-text-faint hover:bg-bs-bg-active hover:text-bs-text"
-            title="Open History panel"
-            onClick={() => setActiveBottomPanel('history')}
-          >
-            Open
-          </button>
+          <div className="flex items-center gap-1">
+            <div className="inline-flex rounded border border-bs-border bg-bs-bg-panel p-0.5 text-[10px]">
+              <button
+                onClick={() => setHistoryScope('all')}
+                className={`rounded px-1 py-0.5 ${historyScope === 'all' ? 'bg-bs-bg-active text-bs-text' : 'text-bs-text-faint hover:text-bs-text'}`}
+              >
+                all
+              </button>
+              <button
+                onClick={() => setHistoryScope('focused')}
+                disabled={!activeFile}
+                className={`rounded px-1 py-0.5 ${historyScope === 'focused' ? 'bg-bs-bg-active text-bs-text' : 'text-bs-text-faint hover:text-bs-text'} ${activeFile ? '' : 'opacity-60'}`}
+                title={activeFile ? `Show only ${activeFile.name}` : 'Open a file to filter history'}
+              >
+                file
+              </button>
+            </div>
+            <button
+              className="inline-flex h-5 items-center justify-center rounded px-1 text-[10px] text-bs-text-faint hover:bg-bs-bg-active hover:text-bs-text"
+              title="Open History panel"
+              onClick={() => setActiveBottomPanel('history')}
+            >
+              Open
+            </button>
+          </div>
         </div>
         <div className="bs-scrollbar h-[calc(100%-30px)] overflow-auto px-2 pb-2">
-          {historyItems.length === 0 ? (
+          {filteredHistoryItems.length === 0 ? (
             <div className="px-2 py-1 text-[11px] text-bs-text-faint">- no history yet -</div>
           ) : (
-            historyItems.slice().reverse().slice(0, 30).map((entry) => {
-              const time = new Date(entry.ts).toLocaleTimeString()
-              const diff = summarizeTransactionDiff(entry)
+            filteredHistoryItems.slice().reverse().slice(0, 30).map((entry) => {
+               const time = new Date(entry.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+               const diff = summarizeTransactionDiff(entry)
               return (
                 <div key={entry.id} className="group/row cursor-pointer rounded px-2 py-1 text-[11px] text-bs-text-muted hover:bg-bs-bg-hover hover:text-bs-text"
                   onClick={() => setActiveBottomPanel('history')}
