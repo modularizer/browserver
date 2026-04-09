@@ -5,6 +5,7 @@ import { defineConfig } from 'vite'
 import { viteSingleFile } from 'vite-plugin-singlefile'
 
 export default defineConfig(({ mode }) => ({
+  base: mode === 'singlefile' ? './' : (process.env.GITHUB_ACTIONS ? '/browserver/' : '/'),
   plugins: [
     react(),
     ...(mode === 'singlefile' ? [viteSingleFile(), inlineMonacoWorkerFiles()] : []),
