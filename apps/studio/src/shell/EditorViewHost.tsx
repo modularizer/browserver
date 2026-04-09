@@ -7,12 +7,14 @@ import type { DatabaseSnapshot } from '@browserver/database'
 import type { WorkspaceSnapshot } from '@browserver/storage'
 import type { ProjectBundle } from '../config/projectBundle'
 import { ClientTargetField } from './ClientTargetField'
+import { ServersSection } from './ServersSection'
+import { TsConsoleView, PythonConsoleView, CliEmulatorView } from './ApiConsoleViews'
 import { HistoryPanel } from './HistoryPanel'
 import { TrustPanel } from './TrustPanel'
 import { useCheckpointStore } from '../store/checkpoints'
 import { useDatabaseStore } from '../store/database'
 import { layoutPresets, useLayoutStore } from '../store/layout'
-import { useRuntimeStore, type RuntimeRequestEntry } from '../store/runtime'
+import { useRuntimeStore } from '../store/runtime'
 import { useThemeStore } from '../theme'
 import {
   getEditorViewId,
@@ -158,7 +160,7 @@ function InspectView() {
   )
 }
 
-type ApiViewMode = 'client' | 'swagger' | 'redoc' | 'json' | 'yaml'
+type ApiViewMode = 'client' | 'ts-console' | 'py-console' | 'cli' | 'swagger' | 'redoc' | 'json' | 'yaml'
 
 function ApiView() {
   const [mode, setMode] = useState<ApiViewMode>('client')
@@ -168,7 +170,6 @@ function ApiView() {
   const invocationDrafts = useRuntimeStore((state) => state.invocationDrafts)
   const setInvocationDraft = useRuntimeStore((state) => state.setInvocationDraft)
   const invokeOperation = useRuntimeStore((state) => state.invokeOperation)
-  const requests = useRuntimeStore((state) => state.requests)
   const fetchOperations = useRuntimeStore((state) => state.fetchOperations)
 
   const [isConnecting, setIsConnecting] = useState(false)
@@ -251,7 +252,16 @@ function ApiView() {
         <div className="flex-1" />
         <div className="mx-1 h-4 w-px bg-bs-border" />
         <div className="flex items-center gap-0.5">
-          {(['client', 'swagger', 'redoc', 'json', 'yaml'] as const).map((m) => (
+          {([
+            ['client', 'Client'],
+            ['ts-console', 'TS'],
+            ['py-console', 'Python'],
+            ['cli', 'CLI'],
+            ['swagger', 'Swagger'],
+            ['redoc', 'Redoc'],
+            ['json', 'JSON'],
+            ['yaml', 'YAML'],
+          ] as const).map(([m, label]) => (
             <button
               key={m}
               onClick={() => setMode(m)}
@@ -261,7 +271,7 @@ function ApiView() {
                   : 'text-bs-text-faint hover:bg-bs-bg-hover hover:text-bs-text-muted'
               }`}
             >
-              {m === 'client' ? 'Client' : m === 'swagger' ? 'Swagger' : m === 'redoc' ? 'Redoc' : m === 'json' ? 'JSON' : 'YAML'}
+              {label}
             </button>
           ))}
         </div>
@@ -283,6 +293,12 @@ function ApiView() {
             invokeOperation={invokeOperation}
             isConnecting={isConnecting}
           />
+        ) : mode === 'ts-console' ? (
+          <TsConsoleView />
+        ) : mode === 'py-console' ? (
+          <PythonConsoleView />
+        ) : mode === 'cli' ? (
+          <CliEmulatorView />
         ) : mode === 'swagger' ? (
           <div className="h-full overflow-auto bg-white">
             {stableSpec ? (
@@ -413,100 +429,29 @@ function ApiClientBody({
   operations: RuntimeOperation[]
   invocationDrafts: Record<string, string>
   setInvocationDraft: (operationId: string, draft: string) => void
-  invokeOperation: (id: string) => Promise<void>
+  invokeOperation: (id: string) => Promise<unknown>
   isConnecting: boolean
 }) {
-  const [pending, setPending] = useState<string | null>(null)
-  const [lastResult, setLastResult] = useState<{ ok: boolean; operationId: string; label: string; result?: unknown; error?: { message: string }; durationMs: number } | null>(null)
-  const requests = useRuntimeStore((state) => state.requests)
-
-  // Sync from store whenever requests change
-  useEffect(() => {
-    if (requests.length > 0) {
-      const r = requests[0]
-      setLastResult({
-        ok: r.ok,
-        operationId: r.operationId,
-        label: r.operationLabel ?? r.operationId,
-        result: r.result,
-        error: r.error,
-        durationMs: r.durationMs,
-      })
-      setPending(null)
-    }
-  }, [requests])
-
-  const handleInvoke = async (operationId: string) => {
-    const op = operations.find((o) => o.id === operationId)
-    setPending(op?.label ?? operationId)
-    setLastResult(null)
-    try {
-      await invokeOperation(operationId)
-    } catch (e) {
-      setLastResult({
-        ok: false,
-        operationId,
-        label: op?.label ?? operationId,
-        error: { message: e instanceof Error ? e.message : String(e) },
-        durationMs: 0,
-      })
-    } finally {
-      setPending(null)
-    }
-  }
-
    return (
      <div className="flex h-full min-h-0 bg-bs-bg-panel p-3 text-[11px]">
-       <div className="flex w-[400px] flex-none flex-col gap-1 overflow-auto rounded border border-bs-border bg-bs-bg-sidebar p-3 shadow-sm">
+       <div className="flex w-[260px] flex-none flex-col gap-1 overflow-auto rounded border border-bs-border bg-bs-bg-sidebar p-3 shadow-sm">
+          <ServersSection />
+      </div>
+
+      <div className="ml-3 flex min-w-0 flex-1 flex-col gap-1 overflow-auto rounded border border-bs-border bg-bs-bg-sidebar p-3 shadow-sm">
           {operations.length > 0 ? operations.map((operation) => (
             <OperationItem
               key={operation.id}
               operation={operation}
               draft={invocationDrafts[operation.id] ?? '{}'}
               setDraft={(val) => setInvocationDraft(operation.id, val)}
-              invoke={handleInvoke}
-              latestRequest={requests.find((r) => r.operationId === operation.id) ?? null}
+              invoke={invokeOperation}
             />
           )) : (
            <div className="py-4 text-center text-bs-text-faint italic border border-dashed border-bs-border rounded">
              {isConnecting ? 'Fetching operations...' : 'Connect to a target to see methods'}
            </div>
          )}
-      </div>
-
-      <div className="ml-3 flex min-w-0 flex-1 flex-col rounded border border-bs-border bg-bs-bg-sidebar shadow-sm">
-        <div className="flex-none border-b border-bs-border bg-bs-bg-panel px-3 py-2 text-[10px] font-semibold uppercase tracking-wider text-bs-text">
-          Latest Result
-        </div>
-        <div className="min-h-0 flex-1 overflow-auto p-4">
-          {pending ? (
-            <div className="flex flex-col items-center justify-center gap-2 py-8 text-bs-text-faint">
-              <div className="h-5 w-5 animate-spin rounded-full border-2 border-bs-border border-t-bs-accent" />
-              <span>Running {pending}...</span>
-            </div>
-          ) : lastResult ? (
-            <div className="rounded border border-bs-border bg-bs-bg-panel p-3">
-              <div className="flex items-center justify-between border-b border-bs-border pb-2 mb-2">
-                <div className="flex items-center gap-2">
-                  <div className={`h-2 w-2 rounded-full ${lastResult.ok ? 'bg-bs-good' : 'bg-bs-error'}`} />
-                  <span className="font-bold text-bs-text uppercase text-[10px]">{lastResult.label}</span>
-                  <span className="text-bs-text-faint text-[9px] uppercase tracking-tighter">{lastResult.ok ? 'Success' : 'Error'}</span>
-                </div>
-                {lastResult.durationMs > 0 && (
-                  <span className="text-bs-text-faint font-mono text-[10px]">{lastResult.durationMs}ms</span>
-                )}
-              </div>
-              {lastResult.error ? <div className="text-bs-error font-medium mb-3">{lastResult.error.message}</div> : null}
-              <pre className="overflow-auto whitespace-pre-wrap text-[11px] text-bs-text p-2 bg-bs-bg-sidebar rounded border border-bs-border">
-                {JSON.stringify(lastResult.ok ? (lastResult.result ?? null) : (lastResult.error ?? null), null, 2)}
-              </pre>
-            </div>
-          ) : (
-            <div className="flex items-center justify-center py-8 text-bs-text-faint italic">
-              Invoke a method to see results here
-            </div>
-          )}
-        </div>
       </div>
     </div>
   )
@@ -517,15 +462,29 @@ function OperationItem({
   draft,
   setDraft,
   invoke,
-  latestRequest,
 }: {
   operation: RuntimeOperation
   draft: string
   setDraft: (value: string) => void
-  invoke: (id: string) => Promise<void>
-  latestRequest: RuntimeRequestEntry | null
+  invoke: (id: string) => Promise<unknown>
 }) {
   const [isExpanded, setIsExpanded] = useState(false)
+  const [pending, setPending] = useState(false)
+  const [result, setResult] = useState<{ ok: boolean; data: unknown; durationMs: number } | null>(null)
+
+  const handleInvoke = async () => {
+    setPending(true)
+    setResult(null)
+    const start = Date.now()
+    try {
+      const data = await invoke(operation.id)
+      setResult({ ok: true, data, durationMs: Date.now() - start })
+    } catch (e) {
+      setResult({ ok: false, data: e instanceof Error ? e.message : String(e), durationMs: Date.now() - start })
+    } finally {
+      setPending(false)
+    }
+  }
 
   return (
     <div className="mb-1 overflow-hidden rounded border border-bs-border bg-bs-bg-panel transition-all">
@@ -539,8 +498,11 @@ function OperationItem({
         <span className="font-mono text-[11px] font-semibold text-bs-text flex-1 truncate">
           {operation.label}
         </span>
-        {latestRequest && (
-          <div className={`h-1.5 w-1.5 rounded-full ${latestRequest.ok ? 'bg-bs-good' : 'bg-bs-error'}`} />
+        {pending && (
+          <div className="h-3 w-3 animate-spin rounded-full border border-bs-border border-t-bs-accent" />
+        )}
+        {!pending && result && (
+          <div className={`h-1.5 w-1.5 rounded-full ${result.ok ? 'bg-bs-good' : 'bg-bs-error'}`} />
         )}
       </div>
 
@@ -550,27 +512,61 @@ function OperationItem({
             <div className="text-bs-text-muted leading-relaxed text-[10px] italic">{operation.summary}</div>
           )}
 
-          <OperationForm
-            operation={operation}
-            value={draft}
-            onChange={setDraft}
-          />
+          <div className="flex flex-wrap gap-3">
+            {/* Input + Run */}
+            <div className="flex min-w-[180px] max-w-[280px] flex-col gap-3">
+              <OperationForm
+                operation={operation}
+                value={draft}
+                onChange={setDraft}
+              />
 
-          <div className="flex items-center justify-between pt-1">
-             <button
-               onClick={(e) => {
-                 e.stopPropagation()
-                 void invoke(operation.id)
-               }}
-               className="bg-bs-good text-bs-accent-text px-4 py-1 rounded text-[11px] font-bold hover:opacity-90 shadow-sm"
-             >
-               Run
-             </button>
-             {latestRequest && (
-               <span className="text-[10px] font-mono text-bs-text-faint">
-                 {latestRequest.durationMs}ms
-               </span>
-             )}
+              <div className="flex items-center justify-between">
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    void handleInvoke()
+                  }}
+                  disabled={pending}
+                  className="bg-bs-good text-bs-accent-text px-4 py-1 rounded text-[11px] font-bold hover:opacity-90 shadow-sm disabled:opacity-50"
+                >
+                  {pending ? 'Running...' : 'Run'}
+                </button>
+                {result && (
+                  <span className="text-[10px] font-mono text-bs-text-faint">
+                    {result.durationMs}ms
+                  </span>
+                )}
+              </div>
+            </div>
+
+            {/* Result */}
+            <div className="min-w-[200px] flex-1">
+              {pending ? (
+                <div className="flex items-center justify-center gap-2 py-6 text-bs-text-faint">
+                  <div className="h-3 w-3 animate-spin rounded-full border border-bs-border border-t-bs-accent" />
+                  <span className="text-[10px]">Running...</span>
+                </div>
+              ) : result ? (
+                <div className="rounded border border-bs-border bg-bs-bg-panel p-3 h-full">
+                  <div className="flex items-center justify-between border-b border-bs-border pb-2 mb-2">
+                    <div className="flex items-center gap-2">
+                      <div className={`h-2 w-2 rounded-full ${result.ok ? 'bg-bs-good' : 'bg-bs-error'}`} />
+                      <span className="text-bs-text-faint text-[9px] uppercase tracking-tighter">{result.ok ? 'Success' : 'Error'}</span>
+                    </div>
+                    <span className="text-bs-text-faint font-mono text-[10px]">{result.durationMs}ms</span>
+                  </div>
+                  {!result.ok ? <div className="text-bs-error text-[10px] font-medium mb-2">{String(result.data)}</div> : null}
+                  <pre className="overflow-auto whitespace-pre-wrap text-[10px] text-bs-text p-2 bg-bs-bg-sidebar rounded border border-bs-border max-h-48">
+                    {JSON.stringify(result.data, null, 2)}
+                  </pre>
+                </div>
+              ) : (
+                <div className="flex items-center justify-center py-6 text-bs-text-faint text-[10px] italic">
+                  Run to see result
+                </div>
+              )}
+            </div>
           </div>
         </div>
       )}

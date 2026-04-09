@@ -57,6 +57,27 @@ export interface RuntimeClientRunEntry {
   durationMs?: number
 }
 
+export interface DiscoveredServer {
+  instanceId: string
+  serverName: string
+  workerInfo: { weight?: number; currentClients?: number; acceptingNewClients?: boolean }
+  instanceInfo?: { version?: string; versionHash?: string; openapiHash?: string; updatedAt?: number; serverStartedAt?: number }
+  mqttChallengeVerified: boolean
+  discoveredAt: number
+}
+
+export interface ServerEntry {
+  id: string
+  source: 'local' | 'discovered'
+  serverName: string
+  connectionUrl: string | null
+  status: 'running' | 'stopped' | 'unknown'
+  filePath?: string
+  instanceInfo?: DiscoveredServer['instanceInfo']
+  workerInfo?: DiscoveredServer['workerInfo']
+  mqttChallengeVerified?: boolean
+}
+
 export interface TabRuntimeSession {
   mode: 'idle' | 'server' | 'client'
   language: 'typescript' | 'python' | null
@@ -96,6 +117,10 @@ interface RuntimeState {
   clientTargetUrl: string
   recentClientTargets: string[]
   errorMessage: string | null
+  discoveredServers: DiscoveredServer[]
+  discoveryStatus: 'idle' | 'discovering' | 'error'
+  discoveryError: string | null
+  lastDiscoveryAt: number | null
   focusPaneRuntime: (pane: EditorPaneId) => void
   runPane: (pane: EditorPaneId) => Promise<void>
   stopPane: (pane: EditorPaneId) => Promise<void>
@@ -104,7 +129,7 @@ interface RuntimeState {
   startCurrentServer: () => Promise<void>
   restartCurrentServer: () => Promise<void>
   stopServer: () => Promise<void>
-  invokeOperation: (operationId: string) => Promise<void>
+  invokeOperation: (operationId: string) => Promise<unknown>
   runClientFile: (filePath?: string) => Promise<void>
   setClientTargetUrl: (url: string) => void
   setInvocationDraft: (operationId: string, draft: string) => void
@@ -112,6 +137,8 @@ interface RuntimeState {
   clearRuntimeHistory: () => void
   clearClientRun: () => void
   fetchOperations: (url: string) => Promise<void>
+  discoverServers: (serverName?: string) => Promise<void>
+  switchTarget: (entry: ServerEntry) => Promise<void>
 }
 
 const runtimeHandles = new Map<string, { pane: EditorPaneId; handle: LocalRuntimeHandle }>()
@@ -385,6 +412,39 @@ export function selectRuntimeIsStale(state: RuntimeState): boolean {
   return isRuntimeStale(state)
 }
 
+export function selectLocalServers(state: RuntimeState): ServerEntry[] {
+  return Object.entries(state.tabSessions)
+    .filter(([, session]) => session.mode === 'server' && (session.status === 'running' || session.status === 'starting'))
+    .map(([filePath, session]) => ({
+      id: `local:${filePath}`,
+      source: 'local' as const,
+      serverName: session.serverName ?? filePath.split('/').pop() ?? 'unknown',
+      connectionUrl: session.connectionUrl,
+      status: session.status === 'running' ? 'running' as const : 'unknown' as const,
+      filePath,
+    }))
+}
+
+export function selectAllServers(state: RuntimeState): ServerEntry[] {
+  const local = selectLocalServers(state)
+  const localNames = new Set(local.map((s) => s.serverName))
+
+  const discovered: ServerEntry[] = state.discoveredServers
+    .filter((d) => !localNames.has(d.serverName))
+    .map((d) => ({
+      id: `discovered:${d.instanceId}`,
+      source: 'discovered' as const,
+      serverName: d.serverName,
+      connectionUrl: `css://${d.serverName}`,
+      status: 'unknown' as const,
+      instanceInfo: d.instanceInfo,
+      workerInfo: d.workerInfo,
+      mqttChallengeVerified: d.mqttChallengeVerified,
+    }))
+
+  return [...local, ...discovered]
+}
+
 export function selectTabRuntimeSession(path: string | null | undefined) {
   return (state: RuntimeState) => getTabSession(state, path)
 }
@@ -462,6 +522,10 @@ export const useRuntimeStore = create<RuntimeState>()((set, get) => ({
   clientTargetUrl: '',
   recentClientTargets: loadRecentClientTargets(),
   errorMessage: null,
+  discoveredServers: [],
+  discoveryStatus: 'idle',
+  discoveryError: null,
+  lastDiscoveryAt: null,
   focusPaneRuntime: (pane) => {
     syncVisibleRuntimeFromPane(set, get, pane)
   },
@@ -786,7 +850,7 @@ export const useRuntimeStore = create<RuntimeState>()((set, get) => ({
       if (!client) {
         throw new Error('No connection for this target — use Connect or start a local server')
       }
-      await invokeOpenApiClientOperation(client, operation, input)
+      return await invokeOpenApiClientOperation(client, operation, input)
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error)
       throw new Error(errorMessage)
@@ -913,5 +977,46 @@ export const useRuntimeStore = create<RuntimeState>()((set, get) => ({
 
 
     throw new Error(`Failed to fetch OpenAPI from ${trimmed}`)
+  },
+  discoverServers: async (serverName) => {
+    set({ discoveryStatus: 'discovering', discoveryError: null })
+    try {
+      const name = serverName ?? get().serverName ?? ''
+      if (!name) {
+        set({ discoveryStatus: 'error', discoveryError: 'No server name to discover' })
+        return
+      }
+      const { discoverClientSideServers } = await import('@modularizer/plat-client/client-server')
+      const result = await discoverClientSideServers(name, {
+        workerPool: { discoveryTimeoutMs: 3000 },
+      })
+      set({
+        discoveredServers: result.candidates.map((c) => ({
+          instanceId: c.instanceId,
+          serverName: c.serverName,
+          workerInfo: c.workerInfo ?? {},
+          instanceInfo: c.instanceInfo,
+          mqttChallengeVerified: c.mqttChallengeVerified ?? false,
+          discoveredAt: result.discoveredAt ?? Date.now(),
+        })),
+        discoveryStatus: 'idle',
+        lastDiscoveryAt: Date.now(),
+      })
+    } catch (error) {
+      set({
+        discoveryStatus: 'error',
+        discoveryError: error instanceof Error ? error.message : String(error),
+      })
+    }
+  },
+  switchTarget: async (entry) => {
+    const url = entry.connectionUrl ?? `css://${entry.serverName}`
+    set({ clientTargetUrl: url })
+    const next = [url, ...get().recentClientTargets.filter((t) => t !== url)].slice(0, 8)
+    persistRecentClientTargets(next)
+    set({ recentClientTargets: next })
+    try {
+      await get().fetchOperations(url)
+    } catch { /* fetchOperations logs its own errors */ }
   },
 }))

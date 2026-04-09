@@ -6,6 +6,7 @@ import { useLayoutStore } from '../store/layout'
 import { useTrustStore } from '../store/trust'
 import { selectActiveFile, useWorkspaceStore, type EditorViewId } from '../store/workspace'
 import type { RuntimeOperation } from '../runtime/types'
+import { ServersSection } from './ServersSection'
 
 function formatTime(value: number | undefined) {
   if (!value) return 'n/a'
@@ -231,6 +232,8 @@ export function RightPanel({ onStartTabDrag, onEndTabDrag }: RightPanelProps) {
               </div>
             </Section>
 
+            <ServersSection />
+
             <Section title="Methods">
               <div className="flex flex-col">
                 {operations.length > 0 ? (
@@ -340,7 +343,7 @@ function OperationItem({
   operation: RuntimeOperation
   draft: string
   setDraft: (value: string) => void
-  invoke: (id: string) => Promise<void>
+  invoke: (id: string) => Promise<unknown>
   latestRequest: RuntimeRequestEntry | null
 }) {
   const [isExpanded, setIsExpanded] = useState(false)
