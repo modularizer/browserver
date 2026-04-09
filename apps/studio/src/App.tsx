@@ -4,11 +4,13 @@ import { gunzipSync, strFromU8 } from 'fflate'
 import type { DatabaseSnapshot } from '@browserver/database'
 import { listWorkspaceSnapshots, type WorkspaceSnapshot } from '@browserver/storage'
 import { parseProjectBundle, serializeProjectBundle, type ProjectBundle } from './config/projectBundle'
+import { deleteAllBrowserData, deleteProjectData } from './store/clearData'
 import { BottomPanel } from './shell/BottomPanel'
 import { CommandPalette, type CommandPaletteItem } from './shell/CommandPalette'
 import { Editor } from './shell/Editor'
 import { MenuButton } from './shell/MenuButton'
 import { Modal } from './shell/Modal'
+import { WelcomeModal } from './shell/WelcomeModal'
 import { Resizer } from './shell/Resizer'
 import { RightPanel } from './shell/RightPanel'
 import { Sidebar } from './shell/Sidebar'
@@ -164,6 +166,9 @@ interface TitleBarProps {
   onSetCommandQuery: (query: string) => void
   onApplyLayoutPreset: (presetId: keyof typeof layoutPresets) => void
   onOpenSettings: () => void
+  onDeleteCurrentProject: () => void
+  onDeleteAllData: () => void
+  onOpenWelcome: () => void
 }
 
 function TitleBar({
@@ -178,6 +183,9 @@ function TitleBar({
   onSetCommandQuery,
   onApplyLayoutPreset,
   onOpenSettings,
+  onDeleteCurrentProject,
+  onDeleteAllData,
+  onOpenWelcome,
 }: TitleBarProps) {
   const sample = useWorkspaceStore((state) => state.sample)
   const setActiveBottomPanel = useWorkspaceStore((state) => state.setActiveBottomPanel)
@@ -198,6 +206,11 @@ function TitleBar({
     { id: 'view.history', label: 'Open history panel', hint: 'Bottom', run: () => setActiveBottomPanel('history') },
   ]
 
+  const dataMenu = [
+    { id: 'data.delete-project', label: 'Delete current project data', hint: 'Workspace + DB + trust', run: onDeleteCurrentProject },
+    { id: 'data.delete-all', label: 'Delete ALL data', hint: 'Clears everything + reloads', run: onDeleteAllData },
+  ]
+
   const layoutMenu = (Object.entries(layoutPresets) as Array<[keyof typeof layoutPresets, (typeof layoutPresets)[keyof typeof layoutPresets]]>).map(([presetId, preset]) => ({
     id: `layout.${presetId}`,
     label: preset.label,
@@ -213,7 +226,7 @@ function TitleBar({
   }))
 
   return (
-    <div className="flex h-8 flex-none items-center gap-3 border-b border-bs-border bg-bs-bg-panel px-3 text-[11px]">
+    <div className="relative flex h-8 flex-none items-center gap-3 border-b border-bs-border bg-bs-bg-panel px-3 text-[11px]">
       <div className="flex-none" style={{ width: Math.max(160, sidebarWidth - 12) }}>
         <MenuButton
           label={sample.name}
@@ -243,9 +256,15 @@ function TitleBar({
           title="Open and focus major workbench panels"
           items={viewMenu}
         />
+        <MenuButton
+          label="Data"
+          title="Manage or delete stored project data"
+          items={dataMenu}
+        />
       </div>
-      <div className="flex flex-1 justify-center px-2">
-        <div className="relative w-[min(460px,42vw)]">
+      {/* Search — absolutely centered in the full bar */}
+      <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+        <div className="pointer-events-auto relative w-[min(460px,42vw)]">
           <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-bs-text-faint">
             <svg viewBox="0 0 16 16" aria-hidden="true" className="h-3.5 w-3.5 fill-none stroke-current">
               <circle cx="7" cy="7" r="4.25" strokeWidth="1.5" />
@@ -265,6 +284,17 @@ function TitleBar({
           />
         </div>
       </div>
+      {/* Right: push ℹ️ to far right above the absolute search */}
+      <div className="flex flex-1 justify-end">
+        <button
+          onClick={onOpenWelcome}
+          title="About browserver"
+          className="flex h-5 w-5 flex-none items-center justify-center rounded-full border border-bs-border text-[10px] font-bold text-bs-text-faint hover:border-bs-accent hover:text-bs-accent"
+          aria-label="About browserver"
+        >
+          i
+        </button>
+      </div>
     </div>
   )
 }
@@ -275,6 +305,8 @@ export function App() {
   const externalDragDepthRef = useRef(0)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [exportModalOpen, setExportModalOpen] = useState(false)
+  const [deleteAllConfirmOpen, setDeleteAllConfirmOpen] = useState(false)
+  const [welcomeForceOpen, setWelcomeForceOpen] = useState(false)
   const [projectList, setProjectList] = useState<WorkspaceSnapshot[]>([])
   const [draggedEditorItem, setDraggedEditorItem] = useState<
     | { kind: 'path'; path: string }
@@ -559,6 +591,21 @@ export function App() {
     useWorkspaceStore.getState().setActiveRightPanelTab(layoutPresets[presetId].rightPanelTab)
   }
 
+  const handleDeleteCurrentProject = async () => {
+    await deleteProjectData(sample.id)
+    // Switch to default sample to reset in-memory state
+    const defaultSampleId = samples[0].id
+    if (defaultSampleId) {
+      await setSample(defaultSampleId)
+    }
+    void refreshProjects()
+  }
+
+  const handleDeleteAllData = async () => {
+    // deleteAllBrowserData clears storage and reloads the page
+    await deleteAllBrowserData()
+  }
+
   const refreshProjects = async () => {
     const snapshots = await listWorkspaceSnapshots()
     setProjectList(snapshots)
@@ -786,29 +833,39 @@ export function App() {
     if (!hydrated || hasRestoredServers.current) return
     hasRestoredServers.current = true
 
+    let restoredAnyServer = false
+
     const yamlFile = files.find((f) => f.name === '.browserver.yaml')
-    if (!yamlFile) return
+    if (yamlFile) {
+      try {
+        const config = parseBrowserYaml(yamlFile.content)
+        const servers = config.runtime?.servers as Record<string, string> | undefined
 
-    try {
-      const config = parseBrowserYaml(yamlFile.content)
-      const servers = config.runtime?.servers as Record<string, string> | undefined
-      if (!servers) return
-
-      for (const [pane, filePath] of Object.entries(servers)) {
-        if (filePath && (pane === 'primary' || pane === 'secondary' || pane === 'tertiary')) {
-          // Ensure the pane has the server file active before running
-          const ws = useWorkspaceStore.getState()
-          const fileExists = ws.files.some((f) => f.path === filePath)
-          if (fileExists) {
-            setActiveFile(filePath, pane as EditorPaneId)
-            void runPane(pane as EditorPaneId)
+        if (servers) {
+          for (const [pane, filePath] of Object.entries(servers)) {
+            if (filePath && (pane === 'primary' || pane === 'secondary' || pane === 'tertiary')) {
+              // Ensure the pane has the server file active before running.
+              const ws = useWorkspaceStore.getState()
+              const fileExists = ws.files.some((f) => f.path === filePath)
+              if (fileExists) {
+                restoredAnyServer = true
+                setActiveFile(filePath, pane as EditorPaneId)
+                void runPane(pane as EditorPaneId)
+              }
+            }
           }
         }
+      } catch {
+        // ignore parse errors
       }
-    } catch {
-      // ignore parse errors
     }
-  }, [hydrated, files, runPane, setActiveFile])
+
+    // Default sample startup behavior: if no runtime was restored, auto-run primary server tab.
+    const isBuiltInSample = samples.some((entry) => entry.id === sample.id)
+    if (!restoredAnyServer && isBuiltInSample) {
+      void runPane('primary')
+    }
+  }, [hydrated, files, runPane, sample.id, setActiveFile])
 
   useEffect(() => {
     void refreshProjects()
@@ -1082,6 +1139,9 @@ export function App() {
         onSetCommandQuery={setCommandQuery}
         onApplyLayoutPreset={activatePreset}
         onOpenSettings={() => setSettingsOpen(true)}
+        onDeleteCurrentProject={() => void handleDeleteCurrentProject()}
+        onDeleteAllData={() => setDeleteAllConfirmOpen(true)}
+        onOpenWelcome={() => setWelcomeForceOpen(true)}
       />
       <input
         ref={fileInputRef}
@@ -1256,6 +1316,7 @@ export function App() {
         </>
       </div>
       <CommandPalette commands={commands} />
+      <WelcomeModal forceOpen={welcomeForceOpen} onForceClose={() => setWelcomeForceOpen(false)} />
       <Modal
         open={pendingRunningTabClose !== null}
         title="Close Running Tab"
@@ -1472,6 +1533,40 @@ export function App() {
             ) : null}
           </div>
         ) : null}
+      </Modal>
+      <Modal
+        open={deleteAllConfirmOpen}
+        title="Delete All Data"
+        onClose={() => setDeleteAllConfirmOpen(false)}
+        actions={(
+          <>
+            <button
+              onClick={() => setDeleteAllConfirmOpen(false)}
+              className="rounded bg-bs-bg-hover px-3 py-1 text-bs-text-muted hover:text-bs-text"
+            >
+              cancel
+            </button>
+            <button
+              onClick={() => {
+                setDeleteAllConfirmOpen(false)
+                void handleDeleteAllData()
+              }}
+              className="rounded bg-bs-error px-3 py-1 text-bs-accent-text"
+            >
+              delete everything &amp; reload
+            </button>
+          </>
+        )}
+      >
+        <div className="space-y-2 text-[12px]">
+          <div className="text-bs-text font-medium">This will permanently erase all browserver data.</div>
+          <div className="text-bs-text-muted">
+            All projects, databases, checkpoints, trust records, and settings stored in this browser will be deleted. The page will reload and appear as a fresh install.
+          </div>
+          <div className="rounded border border-bs-error/40 bg-bs-error/10 px-3 py-2 text-[11px] text-bs-error">
+            This cannot be undone.
+          </div>
+        </div>
       </Modal>
       {draggedEditorItem && draggedItemLabel ? (
         <div

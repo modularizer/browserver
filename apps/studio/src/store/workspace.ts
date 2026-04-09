@@ -554,9 +554,12 @@ function isAllowedEditorPath(path: string, files: WorkspaceFile[]): boolean {
 
 function createDefaultEditorSession(files: WorkspaceFile[]): WorkspaceEditorSession {
   const firstPath = files[0]?.path ?? ''
+  // Open the API console view in the secondary pane by default so the two-pane
+  // layout (server editor | API client) is restored even after clearing data.
+  const apiViewPath = editorViewPath('api')
   const paneTabs = normalizePaneTabs({
     primary: { tabs: files.map((file) => file.path), activePath: firstPath },
-    secondary: { tabs: [], activePath: null },
+    secondary: { tabs: [apiViewPath], activePath: apiViewPath },
     tertiary: { tabs: [], activePath: null },
   }, firstPath)
   return {
@@ -567,8 +570,8 @@ function createDefaultEditorSession(files: WorkspaceFile[]): WorkspaceEditorSess
     activeEditorPane: 'primary',
     activeFilePath: firstPath,
     activeBottomPanel: 'logs',
-    activeRightPanelTab: 'inspector',
-    viewTitles: {},
+    activeRightPanelTab: 'client',
+    viewTitles: { [apiViewPath]: 'API Client' },
   }
 }
 
@@ -1067,7 +1070,7 @@ export const useWorkspaceStore = create<WorkspaceState>()((set, get) => ({
   activeFilePath: toPath(samples[0].id, samples[0].files[0].name),
   activeBottomPanel: 'logs',
   activePanel: 'editor',
-  activeRightPanelTab: 'inspector',
+  activeRightPanelTab: 'client',
   viewTitles: {},
   renamingPath: null,
   renamingFolderPath: null,
