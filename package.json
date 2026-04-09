@@ -1,6 +1,6 @@
 {
   "name": "browserver",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
   "description": "A fully static in-browser IDE and dashboard for hosting client-side servers.",
