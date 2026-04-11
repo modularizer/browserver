@@ -95,3 +95,34 @@ body {
   border-left: 3px solid var(--bs-call-active);
   margin-left: 2px;
 }
+
+.bs-slug-mismatch-name {
+  text-decoration-line: underline;
+  text-decoration-style: solid;
+  text-decoration-color: var(--bs-warn);
+  text-underline-offset: 2px;
+  text-decoration-thickness: 1.5px;
+}
+
+.bs-slug-hover-action {
+  position: absolute;
+  z-index: 35;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid var(--bs-border-focus);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--bs-bg-panel) 92%, transparent);
+  color: var(--bs-text);
+  font-size: 10px;
+  line-height: 1;
+  padding: 4px 6px;
+  cursor: pointer;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+
+.bs-slug-hover-action:hover {
+  border-color: var(--bs-accent);
+  color: var(--bs-accent-text);
+  background: var(--bs-accent);
+}
+

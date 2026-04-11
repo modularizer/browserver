@@ -57,7 +57,16 @@ type PaneSplitMode = MdMode | SvgMode | HtmlMode | NotebookMode
 interface PaneHandle {
   container: HTMLDivElement | null
   editor: monaco.editor.IStandaloneCodeEditor | null
-  decorations: monaco.editor.IEditorDecorationsCollection | null
+  runtimeDecorations: monaco.editor.IEditorDecorationsCollection | null
+  slugDecorations: monaco.editor.IEditorDecorationsCollection | null
+  slugMismatches: Array<{ range: monaco.Range; serverName: string }>
+  slugHoverAction: {
+    show: (serverName: string, position: monaco.Position) => void
+    hide: () => void
+    dispose: () => void
+    isHoveringElement: () => boolean
+  } | null
+  slugHoverDisposables: monaco.IDisposable[]
 }
 
 function hasExternalFiles(dataTransfer: DataTransfer | null): boolean {
@@ -153,9 +162,33 @@ export function Editor({
   const primaryContainerRef = useRef<HTMLDivElement>(null)
   const secondaryContainerRef = useRef<HTMLDivElement>(null)
   const tertiaryContainerRef = useRef<HTMLDivElement>(null)
-  const primaryPaneRef = useRef<PaneHandle>({ container: null, editor: null, decorations: null })
-  const secondaryPaneRef = useRef<PaneHandle>({ container: null, editor: null, decorations: null })
-  const tertiaryPaneRef = useRef<PaneHandle>({ container: null, editor: null, decorations: null })
+  const primaryPaneRef = useRef<PaneHandle>({
+    container: null,
+    editor: null,
+    runtimeDecorations: null,
+    slugDecorations: null,
+    slugMismatches: [],
+    slugHoverAction: null,
+    slugHoverDisposables: [],
+  })
+  const secondaryPaneRef = useRef<PaneHandle>({
+    container: null,
+    editor: null,
+    runtimeDecorations: null,
+    slugDecorations: null,
+    slugMismatches: [],
+    slugHoverAction: null,
+    slugHoverDisposables: [],
+  })
+  const tertiaryPaneRef = useRef<PaneHandle>({
+    container: null,
+    editor: null,
+    runtimeDecorations: null,
+    slugDecorations: null,
+    slugMismatches: [],
+    slugHoverAction: null,
+    slugHoverDisposables: [],
+  })
   const modelsRef = useRef(new Map<string, monaco.editor.ITextModel>())
   const viewStatesRef = useRef(new Map<string, monaco.editor.ICodeEditorViewState | null>())
   const hydrated = useWorkspaceStore((state) => state.hydrated)
@@ -186,6 +219,7 @@ export function Editor({
   const tertiaryRuntime = useRuntimeStore(selectTabRuntimeSession(tertiaryPath))
   const tabSessions = useRuntimeStore((state) => state.tabSessions)
   const highlightedHandler = useRuntimeStore((state) => state.highlightedHandler)
+  const projectSlug = useWorkspaceStore((state) => state.sample.id)
   const [paneModes, setPaneModes] = useState<Record<string, PaneSplitMode>>({})
   const setPaneMode = (path: string, mode: PaneSplitMode) => setPaneModes((prev) => ({ ...prev, [path]: mode }))
   const showPaneHeaders = paneTabs.secondary.tabs.length > 0 || paneTabs.tertiary.tabs.length > 0
@@ -328,6 +362,12 @@ export function Editor({
     syncDecorations(secondaryPaneRef.current, secondaryFile, highlightedHandler)
     syncDecorations(tertiaryPaneRef.current, tertiaryFile, highlightedHandler)
   }, [highlightedHandler, primaryFile, secondaryFile, tertiaryFile])
+
+  useEffect(() => {
+    syncSlugMismatchDecorations(primaryPaneRef.current, primaryFile, projectSlug)
+    syncSlugMismatchDecorations(secondaryPaneRef.current, secondaryFile, projectSlug)
+    syncSlugMismatchDecorations(tertiaryPaneRef.current, tertiaryFile, projectSlug)
+  }, [primaryFile, secondaryFile, tertiaryFile, projectSlug])
 
   return (
     <div ref={editorContainerRef} className="flex h-full w-full min-w-0">
@@ -566,7 +606,41 @@ export function Editor({
         void state.saveFile(path, `Auto-save ${file?.name ?? path}`)
       }
     })
-    pane.decorations = pane.editor.createDecorationsCollection([])
+    pane.runtimeDecorations = pane.editor.createDecorationsCollection([])
+    pane.slugDecorations = pane.editor.createDecorationsCollection([])
+    pane.slugHoverAction = createSlugHoverAction(pane)
+    pane.slugHoverDisposables = [
+      pane.editor.onMouseMove((event) => {
+        const hoverAction = pane.slugHoverAction
+        if (!hoverAction || pane.slugMismatches.length === 0) {
+          hoverAction?.hide()
+          return
+        }
+
+        const position = event.target.position
+        if (!position) {
+          if (!hoverAction.isHoveringElement()) {
+            hoverAction.hide()
+          }
+          return
+        }
+
+        const match = pane.slugMismatches.find((entry) => entry.range.containsPosition(position))
+        if (!match) {
+          if (!hoverAction.isHoveringElement()) {
+            hoverAction.hide()
+          }
+          return
+        }
+
+        hoverAction.show(match.serverName, match.range.getEndPosition())
+      }),
+      pane.editor.onMouseLeave(() => {
+        if (!pane.slugHoverAction?.isHoveringElement()) {
+          pane.slugHoverAction?.hide()
+        }
+      }),
+    ]
     pane.editor.onDidChangeModelContent(() => {
       const model = pane.editor?.getModel()
       if (!model) return
@@ -611,6 +685,7 @@ function PaneContent({
   splitMode?: PaneSplitMode
   onChangeSplitMode: (mode: PaneSplitMode) => void
 }) {
+  const runtimeSession = useRuntimeStore(selectTabRuntimeSession(path))
   const isMarkdown = file?.language === 'markdown'
   const isSvg = isSvgFile(file)
   const isHtml = file?.language === 'html'
@@ -623,6 +698,23 @@ function PaneContent({
   const isArchive = isArchiveFile(file)
   const hasSplit = (isMarkdown || isSvg || isHtml || isNotebook) && !view
   const mode = hasSplit ? (splitMode ?? 'split') : 'code'
+  const hasRunningServer = runtimeSession.mode === 'server'
+    && (runtimeSession.status === 'running' || runtimeSession.status === 'starting')
+    && Boolean(runtimeSession.serverName)
+
+  const openRunningServerInNewTab = useCallback(() => {
+    const serverName = runtimeSession.serverName?.trim()
+    if (!serverName) return
+    const baseUrl = import.meta.env.BASE_URL || '/'
+    const basePrefix = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`
+    const serverPath = serverName
+      .split('/')
+      .filter(Boolean)
+      .map((segment) => encodeURIComponent(segment))
+      .join('/')
+    const href = new URL(`${basePrefix}${serverPath}`, window.location.origin).toString()
+    window.open(href, '_blank', 'noopener,noreferrer')
+  }, [runtimeSession.serverName])
 
   return (
     <div className="flex h-full w-full flex-col">
@@ -640,6 +732,16 @@ function PaneContent({
         </div>
       ) : null}
       <div className="relative flex min-h-0 flex-1">
+        {hasRunningServer ? (
+          <button
+            onClick={openRunningServerInNewTab}
+            className="absolute right-2 top-2 z-20 flex h-[24px] w-[24px] items-center justify-center rounded border border-bs-border bg-bs-bg-panel/95 text-bs-text-faint hover:bg-bs-bg-hover hover:text-bs-text"
+            title="Open running server in its own tab"
+            aria-label="Open running server in its own tab"
+          >
+            ↗
+          </button>
+        ) : null}
         <div
           ref={containerRef}
           className={`h-full ${
@@ -1596,8 +1698,17 @@ function DropTarget({
 }
 
 function disposePane(pane: PaneHandle) {
-  pane.decorations?.clear()
-  pane.decorations = null
+  pane.runtimeDecorations?.clear()
+  pane.runtimeDecorations = null
+  pane.slugDecorations?.clear()
+  pane.slugDecorations = null
+  pane.slugMismatches = []
+  pane.slugHoverAction?.dispose()
+  pane.slugHoverAction = null
+  for (const disposable of pane.slugHoverDisposables) {
+    disposable.dispose()
+  }
+  pane.slugHoverDisposables = []
   pane.editor?.setModel(null)
   pane.editor?.dispose()
   pane.editor = null
@@ -1607,7 +1718,7 @@ function disposePane(pane: PaneHandle) {
 function syncDecorations(pane: PaneHandle, file: WorkspaceFile | null, highlightedHandler: string | null) {
   const editor = pane.editor
   const model = editor?.getModel()
-  const decorations = pane.decorations
+  const decorations = pane.runtimeDecorations
 
   if (!editor || !model || !decorations) return
 
@@ -1633,6 +1744,154 @@ function syncDecorations(pane: PaneHandle, file: WorkspaceFile | null, highlight
       },
     },
   ])
+}
+
+function syncSlugMismatchDecorations(pane: PaneHandle, file: WorkspaceFile | null, projectSlug: string) {
+  const editor = pane.editor
+  const model = editor?.getModel()
+  const decorations = pane.slugDecorations
+
+  if (!editor || !model || !decorations) return
+
+  const isCodeFile = file?.language === 'typescript' || file?.language === 'javascript'
+  if (!isCodeFile || !file) {
+    decorations.set([])
+    pane.slugMismatches = []
+    pane.slugHoverAction?.hide()
+    return
+  }
+
+  const matches = findServeClientSideServerLiterals(model.getValue())
+  const mismatches = matches.filter((entry) => entry.serverName !== projectSlug)
+  pane.slugMismatches = mismatches.map((entry) => {
+    const start = model.getPositionAt(entry.startOffset)
+    const end = model.getPositionAt(entry.endOffset)
+    return {
+      serverName: entry.serverName,
+      range: new monaco.Range(start.lineNumber, start.column, end.lineNumber, end.column),
+    }
+  })
+
+  if (pane.slugMismatches.length === 0) {
+    decorations.set([])
+    pane.slugHoverAction?.hide()
+    return
+  }
+
+  decorations.set(pane.slugMismatches.map((entry) => ({
+    range: entry.range,
+    options: {
+      inlineClassName: 'bs-slug-mismatch-name',
+      hoverMessage: {
+        value: `Server name differs from project slug \`${projectSlug}\`.`,
+      },
+    },
+  })))
+}
+
+function findServeClientSideServerLiterals(source: string): Array<{ serverName: string; startOffset: number; endOffset: number }> {
+  const results: Array<{ serverName: string; startOffset: number; endOffset: number }> = []
+  const pattern = /serveClientSideServer\s*\(\s*(['"`])([^'"`\n\r]+)\1/g
+  let match: RegExpExecArray | null
+
+  while ((match = pattern.exec(source)) !== null) {
+    const rawName = (match[2] ?? '').trim()
+    if (!rawName) continue
+    const fullMatch = match[0] ?? ''
+    const relativeNameIndex = fullMatch.indexOf(rawName)
+    if (relativeNameIndex < 0) continue
+    const startOffset = match.index + relativeNameIndex
+    const endOffset = startOffset + rawName.length
+    results.push({
+      serverName: rawName,
+      startOffset,
+      endOffset,
+    })
+  }
+
+  return results
+}
+
+function createSlugHoverAction(pane: PaneHandle) {
+  const editor = pane.editor
+  const container = pane.container
+  if (!editor || !container) return null
+
+  const button = document.createElement('button')
+  button.type = 'button'
+  button.className = 'bs-slug-hover-action'
+  button.style.display = 'none'
+
+  let currentName: string | null = null
+  let hoveringElement = false
+  let hideTimer: number | null = null
+
+  const cancelHide = () => {
+    if (hideTimer !== null) {
+      window.clearTimeout(hideTimer)
+      hideTimer = null
+    }
+  }
+
+  const scheduleHide = () => {
+    cancelHide()
+    hideTimer = window.setTimeout(() => {
+      if (!hoveringElement) {
+        button.style.display = 'none'
+      }
+      hideTimer = null
+    }, 220)
+  }
+
+  button.addEventListener('mouseenter', () => {
+    cancelHide()
+    hoveringElement = true
+  })
+  button.addEventListener('mouseleave', () => {
+    hoveringElement = false
+    scheduleHide()
+  })
+  button.addEventListener('mousedown', (event) => {
+    event.preventDefault()
+    event.stopPropagation()
+  })
+  button.addEventListener('click', (event) => {
+    event.preventDefault()
+    event.stopPropagation()
+    const target = currentName?.trim()
+    if (!target) return
+    useWorkspaceStore.getState().renameProjectSlug(target)
+    button.style.display = 'none'
+  })
+
+  container.appendChild(button)
+
+  return {
+    show(serverName: string, position: monaco.Position) {
+      cancelHide()
+      const pixel = editor.getScrolledVisiblePosition(position)
+      if (!pixel) {
+        scheduleHide()
+        return
+      }
+      currentName = serverName
+      button.textContent = `Rename slug to '${serverName}'`
+      button.style.left = `${Math.max(8, pixel.left + 12)}px`
+      button.style.top = `${Math.max(6, pixel.top + 6)}px`
+      button.style.display = 'inline-flex'
+    },
+    hide() {
+      if (hoveringElement) return
+      scheduleHide()
+    },
+    dispose() {
+      cancelHide()
+      button.remove()
+    },
+    isHoveringElement() {
+      return hoveringElement
+    },
+  }
 }
 
 function escapeRegExp(input: string): string {

@@ -173,10 +173,10 @@ function InspectView() {
   )
 }
 
-type ApiViewMode = 'client' | 'ts-console' | 'py-console' | 'cli' | 'swagger' | 'redoc' | 'json' | 'yaml'
+export type ApiViewMode = 'client' | 'ts-console' | 'py-console' | 'cli' | 'swagger' | 'redoc' | 'json' | 'yaml'
 
-function ApiView() {
-  const [mode, setMode] = useState<ApiViewMode>('client')
+export function ApiView({ initialMode = 'client' }: { initialMode?: ApiViewMode }) {
+  const [mode, setMode] = useState<ApiViewMode>(initialMode)
   const clientTargetUrl = useRuntimeStore((state) => state.clientTargetUrl)
   const openapiDocument = useRuntimeStore((state) => state.openapiDocument)
   const operations = useRuntimeStore((state) => state.operations)
@@ -236,6 +236,10 @@ function ApiView() {
       }
     }
   }
+
+  useEffect(() => {
+    setMode(initialMode)
+  }, [initialMode])
 
   useEffect(() => {
     if (clientTargetUrl) {
@@ -995,6 +999,25 @@ function BrowserView() {
     createConnection,
   })
 
+  const openInOwnTab = useCallback(() => {
+    const source = browserUrl.trim().startsWith('css://')
+      ? browserUrl
+      : (connectionUrl ?? '')
+    const serverName = parseCssServerName(source)
+      ?? parseCssServerName(connectionUrl ?? '')
+    if (!serverName) return
+
+    const baseUrl = import.meta.env.BASE_URL || '/'
+    const basePrefix = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`
+    const serverPath = serverName
+      .split('/')
+      .filter(Boolean)
+      .map((segment) => encodeURIComponent(segment))
+      .join('/')
+    const href = new URL(`${basePrefix}${serverPath}`, window.location.origin).toString()
+    window.open(href, '_blank', 'noopener,noreferrer')
+  }, [browserUrl, connectionUrl])
+
   // Auto-navigate on mount or server restart
   useEffect(() => {
     if (!hasRunningServer) return
@@ -1051,6 +1074,14 @@ function BrowserView() {
           className="rounded bg-bs-good px-3 py-1 text-[11px] font-medium text-bs-accent-text hover:opacity-90"
         >
           Go
+        </button>
+        <button
+          onClick={openInOwnTab}
+          className="flex h-[26px] w-[26px] items-center justify-center rounded border border-bs-border bg-bs-bg-sidebar text-bs-text-faint hover:bg-bs-bg-hover hover:text-bs-text"
+          title="Open this target in its own tab"
+          aria-label="Open this target in its own tab"
+        >
+          ↗
         </button>
       </div>
 

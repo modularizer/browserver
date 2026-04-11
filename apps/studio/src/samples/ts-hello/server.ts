@@ -7,4 +7,4 @@ class HelloApi {
   }
 }
 
-export default serveClientSideServer('hello', [HelloApi])
+export default serveClientSideServer('ts-hello', [HelloApi])

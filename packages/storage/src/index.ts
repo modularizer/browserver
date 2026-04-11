@@ -112,3 +112,8 @@ export async function listWorkspaceSnapshots(): Promise<WorkspaceSnapshot[]> {
   const snapshots = await withSnapshotStore<WorkspaceSnapshot[]>('readonly', (store) => store.getAll())
   return snapshots.sort((a, b) => b.updatedAt - a.updatedAt)
 }
+
+export async function deleteWorkspaceSnapshot(id: string): Promise<void> {
+  await withSnapshotStore<undefined>('readwrite', (store) => store.delete(id))
+}
+

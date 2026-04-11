@@ -14,4 +14,4 @@ class SiteApi {
   }
 }
 
-export default serveClientSideServer('static-site', [SiteApi])
+export default serveClientSideServer('ts-static-site', [SiteApi])

@@ -2,6 +2,7 @@
 import {
   loadWorkspaceSnapshot,
   saveWorkspaceSnapshot,
+  deleteWorkspaceSnapshot,
   type WorkspaceSnapshot,
   type StoredWorkspaceFile,
   StoredWorkspaceLanguage,
@@ -90,7 +91,7 @@ interface WorkspaceState {
   renamingPath: string | null
   renamingFolderPath: string | null
   editorSession: () => WorkspaceEditorSession
-  hydrate: () => Promise<void>
+  hydrate: (preferredId?: string) => Promise<boolean>
   setSample: (id: string) => Promise<void>
   importSnapshot: (snapshot: WorkspaceSnapshot) => Promise<void>
   restoreEditorSession: (session: WorkspaceEditorSession | null | undefined) => void
@@ -117,12 +118,14 @@ interface WorkspaceState {
   setActiveBottomPanel: (panel: BottomPanelId) => void
   setActivePanel: (panel: WorkbenchPanelId) => void
   setActiveRightPanelTab: (tab: RightPanelTabId) => void
+  renameProject: (name: string) => void
+  renameProjectSlug: (slug: string) => void
   updateFileContent: (path: string, content: string) => void
   saveFile: (path: string, message?: string) => Promise<void>
 }
 
 const saveTimers = new Map<string, number>()
-const ACTIVE_WORKSPACE_KEY = 'browserver:active-workspace'
+export const ACTIVE_WORKSPACE_KEY = 'browserver:active-workspace'
 const editorPaneOrder: EditorPaneId[] = ['primary', 'secondary', 'tertiary']
 const WORKSPACE_UI_KEY_PREFIX = 'browserver:workspace-ui:'
 
@@ -1090,9 +1093,21 @@ export const useWorkspaceStore = create<WorkspaceState>()((set, get) => ({
       viewTitles: state.viewTitles,
     }
   },
-  hydrate: async () => {
-    const preferredId = window.localStorage.getItem(ACTIVE_WORKSPACE_KEY) ?? get().sample.id
-    const { sample, files } = await loadSampleWorkspace(preferredId)
+  hydrate: async (preferredId) => {
+    const explicitPreferredId = preferredId?.trim() || null
+    let resolvedPreferredId = explicitPreferredId ?? window.localStorage.getItem(ACTIVE_WORKSPACE_KEY) ?? get().sample.id
+    let matchedExplicitRoute = true
+
+    if (explicitPreferredId) {
+      const builtInExists = samples.some((entry) => entry.id === explicitPreferredId)
+      const persistedExists = builtInExists ? true : Boolean(await loadWorkspaceSnapshot(explicitPreferredId))
+      matchedExplicitRoute = builtInExists || persistedExists
+      if (matchedExplicitRoute) {
+        resolvedPreferredId = explicitPreferredId
+      }
+    }
+
+    const { sample, files } = await loadSampleWorkspace(resolvedPreferredId)
     const session = loadWorkspaceUiState(sample.id, files)
 
     set({
@@ -1111,7 +1126,10 @@ export const useWorkspaceStore = create<WorkspaceState>()((set, get) => ({
       activeRightPanelTab: session.activeRightPanelTab,
       viewTitles: session.viewTitles ?? {},
     })
-    persistActiveWorkspaceId(sample.id)
+    if (!explicitPreferredId || matchedExplicitRoute) {
+      persistActiveWorkspaceId(sample.id)
+    }
+    return !explicitPreferredId || matchedExplicitRoute
   },
   setSample: async (id: string) => {
     const { sample, files } = await loadSampleWorkspace(id)
@@ -1933,6 +1951,101 @@ export const useWorkspaceStore = create<WorkspaceState>()((set, get) => ({
       })
       return { activeRightPanelTab: tab }
     }),
+  renameProject: (name: string) => {
+    const trimmed = name.trim()
+    if (!trimmed) return
+    const state = get()
+    if (state.sample.name === trimmed) return
+    const sample = { ...state.sample, name: trimmed }
+    set({ sample })
+    queueSave(currentSnapshot({ ...state, sample }), () => {
+      set((latest) => ({ dirtyFilePaths: latest.dirtyFilePaths }))
+    })
+  },
+  renameProjectSlug: (slug: string) => {
+    const trimmed = slug.trim()
+    if (!trimmed) return
+    const state = get()
+    const oldId = state.sample.id
+    if (oldId === trimmed) return
+
+    const oldPrefix = `/${oldId}/`
+    const newPrefix = `/${trimmed}/`
+    const remapPath = (path: string | null): string | null => {
+      if (!path) return path
+      if (path.startsWith(oldPrefix)) return `${newPrefix}${path.slice(oldPrefix.length)}`
+      return path
+    }
+
+    const files = state.files.map((file) => ({
+      ...file,
+      path: remapPath(file.path) ?? file.path,
+    }))
+    const openFilePaths = state.openFilePaths.map((p) => remapPath(p) ?? p)
+    const dirtyFilePaths = state.dirtyFilePaths.map((p) => remapPath(p) ?? p)
+    const activeFilePath = remapPath(state.activeFilePath) ?? state.activeFilePath
+    const paneTabs: EditorPaneTabState = {
+      primary: {
+        tabs: state.paneTabs.primary.tabs.map((p) => remapPath(p) ?? p),
+        activePath: remapPath(state.paneTabs.primary.activePath),
+      },
+      secondary: {
+        tabs: state.paneTabs.secondary.tabs.map((p) => remapPath(p) ?? p),
+        activePath: remapPath(state.paneTabs.secondary.activePath),
+      },
+      tertiary: {
+        tabs: state.paneTabs.tertiary.tabs.map((p) => remapPath(p) ?? p),
+        activePath: remapPath(state.paneTabs.tertiary.activePath),
+      },
+    }
+    const paneFiles = {
+      primary: remapPath(state.paneFiles.primary) ?? state.paneFiles.primary,
+      secondary: remapPath(state.paneFiles.secondary),
+      tertiary: remapPath(state.paneFiles.tertiary),
+    }
+    const viewTitles = Object.fromEntries(
+      Object.entries(state.viewTitles).map(([path, title]) => [remapPath(path) ?? path, title]),
+    )
+    const sample = { ...state.sample, id: trimmed }
+
+    const newSnapshot: WorkspaceSnapshot = {
+      id: trimmed,
+      name: sample.name,
+      serverLanguage: sample.serverLanguage,
+      files: files.map(({ path, language, content, updatedAt }) => ({ path, language, content, updatedAt })),
+      updatedAt: Date.now(),
+    }
+    void saveWorkspaceSnapshot(newSnapshot).then(() => {
+      void deleteWorkspaceSnapshot(oldId)
+    })
+
+    // Migrate localStorage UI session key
+    try {
+      const oldUiState = window.localStorage.getItem(workspaceUiKey(oldId))
+      if (oldUiState) {
+        window.localStorage.setItem(workspaceUiKey(trimmed), oldUiState)
+        window.localStorage.removeItem(workspaceUiKey(oldId))
+      }
+    } catch { /* ignore */ }
+
+    // Update active workspace pointer
+    try {
+      window.localStorage.setItem(ACTIVE_WORKSPACE_KEY, JSON.stringify(trimmed))
+    } catch { /* ignore */ }
+
+    set({
+      sample,
+      files,
+      openFilePaths,
+      dirtyFilePaths,
+      activeFilePath,
+      paneTabs,
+      paneFiles,
+      viewTitles,
+      renamingPath: null,
+      renamingFolderPath: null,
+    })
+  },
   updateFileContent: (path: string, content: string) => {
     const current = get()
     const targetFile = current.files.find((file) => file.path === path)

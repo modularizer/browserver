@@ -10,6 +10,7 @@ import { CommandPalette, type CommandPaletteItem } from './shell/CommandPalette'
 import { Editor } from './shell/Editor'
 import { MenuButton } from './shell/MenuButton'
 import { Modal } from './shell/Modal'
+import { RenameProjectModal } from './shell/RenameProjectModal'
 import { WelcomeModal } from './shell/WelcomeModal'
 import { Resizer } from './shell/Resizer'
 import { RightPanel } from './shell/RightPanel'
@@ -30,6 +31,7 @@ import { editorViewDefinitions, getEditorItemLabel, getEditorViewId, parseBrowse
 
 interface AppProps {
   initialProjectId?: string
+  onProjectRouteChange?: (projectId: string, options?: { replace?: boolean }) => void
 }
 
 interface PendingExternalImport {
@@ -303,7 +305,7 @@ function TitleBar({
   )
 }
 
-export function App({ initialProjectId }: AppProps) {
+export function App({ initialProjectId, onProjectRouteChange }: AppProps) {
   useFavicon()
   const fileInputRef = useRef<HTMLInputElement>(null)
   const externalDragDepthRef = useRef(0)
@@ -311,6 +313,7 @@ export function App({ initialProjectId }: AppProps) {
   const [exportModalOpen, setExportModalOpen] = useState(false)
   const [deleteAllConfirmOpen, setDeleteAllConfirmOpen] = useState(false)
   const [welcomeForceOpen, setWelcomeForceOpen] = useState(false)
+  const [renamingProject, setRenamingProject] = useState(false)
   const [projectList, setProjectList] = useState<WorkspaceSnapshot[]>([])
   const [draggedEditorItem, setDraggedEditorItem] = useState<
     | { kind: 'path'; path: string }
@@ -337,6 +340,8 @@ export function App({ initialProjectId }: AppProps) {
   const toggleBottom = useLayoutStore((state) => state.toggleBottom)
   const toggleRight = useLayoutStore((state) => state.toggleRight)
   const setSample = useWorkspaceStore((state) => state.setSample)
+  const renameProject = useWorkspaceStore((state) => state.renameProject)
+  const renameProjectSlug = useWorkspaceStore((state) => state.renameProjectSlug)
   const assignFileToPane = useWorkspaceStore((state) => state.assignFileToPane)
   const splitFileToPane = useWorkspaceStore((state) => state.splitFileToPane)
   const openEditorView = useWorkspaceStore((state) => state.openEditorView)
@@ -392,33 +397,6 @@ export function App({ initialProjectId }: AppProps) {
     showRight,
   }
   const syncBrowserYaml = useWorkspaceStore((state) => state.syncBrowserYaml)
-
-  useEffect(() => {
-    if (!hydrated || !initialProjectId || sample.id === initialProjectId) return
-
-    let cancelled = false
-
-    void (async () => {
-      const snapshots = await listWorkspaceSnapshots()
-      if (cancelled) return
-      const hasProject = snapshots.some((snapshot) => snapshot.id === initialProjectId)
-        || samples.some((entry) => entry.id === initialProjectId)
-
-      if (hasProject) {
-        await setSample(initialProjectId)
-        if (!cancelled) {
-          setRouteNotice(null)
-        }
-        return
-      }
-
-      setRouteNotice(`Route requested project "${initialProjectId}", but no local project matched it.`)
-    })()
-
-    return () => {
-      cancelled = true
-    }
-  }, [hydrated, initialProjectId, sample.id, setSample])
 
   const buildCurrentBundle = (): ProjectBundle => {
     const workspace: WorkspaceSnapshot = {
@@ -655,7 +633,7 @@ export function App({ initialProjectId }: AppProps) {
       id = `project-${index}`
     }
 
-    const name = `Project ${index}`
+    const name = id
     await importWorkspace({
       id,
       name,
@@ -674,7 +652,7 @@ export function App({ initialProjectId }: AppProps) {
             '  }',
             '}',
             '',
-            "export default serveClientSideServer('api', [Api])",
+            `export default serveClientSideServer('${id}', [Api])`,
             '',
           ].join('\n'),
           updatedAt: Date.now(),
@@ -856,8 +834,35 @@ export function App({ initialProjectId }: AppProps) {
   ])
 
   useEffect(() => {
-    void hydrate()
-  }, [hydrate])
+    let cancelled = false
+
+    void hydrate(initialProjectId).then((matchedRoute) => {
+      if (cancelled) return
+      if (!initialProjectId || matchedRoute) {
+        setRouteNotice(null)
+        return
+      }
+      setRouteNotice(`Route requested project "${initialProjectId}", but no local project matched it.`)
+    })
+
+    return () => {
+      cancelled = true
+    }
+  }, [hydrate, initialProjectId])
+
+  const hasSyncedProjectRouteRef = useRef(false)
+  useEffect(() => {
+    if (!hydrated || !sample.id || !onProjectRouteChange) return
+    // On first sync: skip URL update if the route specified a project that wasn't found
+    // (keeps the "not found" notice visible and preserves the original URL).
+    // After that first attempt, always sync so manual project switches update the URL.
+    if (!hasSyncedProjectRouteRef.current && initialProjectId && sample.id !== initialProjectId) {
+      hasSyncedProjectRouteRef.current = true // unblock future syncs
+      return
+    }
+    onProjectRouteChange(sample.id, { replace: !hasSyncedProjectRouteRef.current })
+    hasSyncedProjectRouteRef.current = true
+  }, [hydrated, initialProjectId, onProjectRouteChange, sample.id])
 
   // Restart servers that were running before page refresh
   const hasRestoredServers = useRef(false)
@@ -940,6 +945,12 @@ export function App({ initialProjectId }: AppProps) {
       run: () => void
     }> = []
 
+    items.push({
+      id: 'project.rename',
+      label: 'Rename project…',
+      hint: 'Edit display name',
+      run: () => setRenamingProject(true),
+    })
     items.push({
       id: 'project.new',
       label: 'New Project',
@@ -1605,6 +1616,17 @@ export function App({ initialProjectId }: AppProps) {
           </div>
         </div>
       </Modal>
+      <RenameProjectModal
+        open={renamingProject}
+        currentName={sample.name}
+        currentSlug={sample.id}
+        onConfirm={(name, slug) => {
+          renameProject(name)
+          if (slug !== sample.id) renameProjectSlug(slug)
+          setRenamingProject(false)
+        }}
+        onClose={() => setRenamingProject(false)}
+      />
       {draggedEditorItem && draggedItemLabel ? (
         <div
           className="pointer-events-none fixed z-[80] rounded border border-bs-border bg-bs-bg-panel/95 px-2 py-1 text-[11px] text-bs-text shadow-lg backdrop-blur-sm"

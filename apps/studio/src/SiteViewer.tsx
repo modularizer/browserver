@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo } from 'react'
 import { buildCssTargetUrl } from './runtime/clientTargetUrl'
 import { usePlatBrowserFrame } from './browser/usePlatBrowserFrame'
+import { ApiView, type ApiViewMode } from './shell/EditorViewHost'
+import { useRuntimeStore } from './store/runtime'
 
 /**
  * SiteViewer: Full-page renderer for a client-side server's static site.
@@ -12,7 +14,18 @@ import { usePlatBrowserFrame } from './browser/usePlatBrowserFrame'
  * The bridge transparently routes all fetch/XHR/resource loads (img src,
  * link href, script src, etc.) through the WebRTC channel to the CSS server.
  */
-export function SiteViewer({ serverName }: { serverName: string }) {
+export function SiteViewer({
+  serverName,
+  initialApiMode,
+  previewMode = 'browser',
+  targetUrl,
+}: {
+  serverName: string
+  initialApiMode?: ApiViewMode
+  previewMode?: 'browser' | 'api'
+  targetUrl?: string
+}) {
+  const setClientTargetUrl = useRuntimeStore((state) => state.setClientTargetUrl)
   const createConnection = useCallback(async (connectionUrl: string) => {
     const {
       createClientSideServerMQTTWebRTCPeerPool,
@@ -51,11 +64,32 @@ export function SiteViewer({ serverName }: { serverName: string }) {
     if (loading) return hasConnection ? 'loading' : 'connecting'
     return 'ready'
   }, [error, hasConnection, loading])
+  const showApiFallback = Boolean(
+    !loading
+    && error
+    && hasConnection
+    && /^404\b/.test(error.trim()),
+  )
+  const showApiView = previewMode === 'api' || showApiFallback
 
   useEffect(() => {
+    if (previewMode === 'api') return
     const cssUrl = `${buildCssTargetUrl(serverName)}/`
     void navigate(cssUrl)
-  }, [navigate, serverName])
+  }, [navigate, previewMode, serverName])
+
+  useEffect(() => {
+    if (!showApiView) return
+    setClientTargetUrl(targetUrl ?? buildCssTargetUrl(serverName))
+  }, [serverName, setClientTargetUrl, showApiView, targetUrl])
+
+  if (showApiView) {
+    return (
+      <div style={{ position: 'fixed', inset: 0, background: 'var(--bs-bg)' }}>
+        <ApiView initialMode={initialApiMode ?? 'client'} />
+      </div>
+    )
+  }
 
   if (status === 'error') {
     return (
