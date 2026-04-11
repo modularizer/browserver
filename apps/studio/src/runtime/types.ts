@@ -54,4 +54,6 @@ export interface LocalRuntimeHandle {
   serverName: string
   connectionUrl: string | null
   stop: () => Promise<void>
+  /** The in-process server instance (for direct channel creation, e.g. Browser view) */
+  server?: unknown
 }

@@ -141,7 +141,69 @@ interface RuntimeState {
   switchTarget: (entry: ServerEntry) => Promise<void>
 }
 
-const runtimeHandles = new Map<string, { pane: EditorPaneId; handle: LocalRuntimeHandle }>()
+type RuntimeHandleEntry = { pane: EditorPaneId; handle: LocalRuntimeHandle }
+
+/**
+ * Module-level map of file path → runtime handle.
+ * Stored on `window` so it survives Vite HMR module reloads — otherwise the map
+ * is reset while the Zustand store (and the running server) remain alive.
+ */
+const runtimeHandles: Map<string, RuntimeHandleEntry> = (() => {
+  const w = globalThis as Record<string, unknown>
+  if (!(w.__browserver_runtimeHandles instanceof Map)) {
+    w.__browserver_runtimeHandles = new Map<string, RuntimeHandleEntry>()
+  }
+  return w.__browserver_runtimeHandles as Map<string, RuntimeHandleEntry>
+})()
+
+/** Get the in-process server from the active runtime handle (for Browser view direct channels) */
+export function getActiveRuntimeServer(): unknown | null {
+  for (const [, entry] of runtimeHandles) {
+    if (entry.handle.server) return entry.handle.server
+  }
+  return null
+}
+
+/**
+ * Get the in-process server instance for a specific CSS connection URL.
+ * Returns null if the server is not running in-process (e.g. it's a remote server).
+ */
+export function getRuntimeServerForConnectionUrl(connectionUrl: string): unknown | null {
+  const normalizeCssAddress = (value: string | null | undefined): string | null => {
+    if (!value || !value.startsWith('css://')) return null
+    try {
+      const parsed = new URL(value)
+      const server = parsed.host || parsed.pathname.replace(/^\/+/, '')
+      return server ? `css://${server}` : null
+    } catch {
+      return null
+    }
+  }
+
+  const target = normalizeCssAddress(connectionUrl)
+  if (!target) return null
+
+  for (const [, entry] of runtimeHandles) {
+    if (!entry.handle.server) continue
+    const candidate = normalizeCssAddress(entry.handle.connectionUrl)
+    if (candidate === target) {
+      return entry.handle.server
+    }
+  }
+  return null
+}
+
+/** Resolve an in-process server by serverName when connection URLs are temporarily out of sync. */
+export function getRuntimeServerForServerName(serverName: string): unknown | null {
+  if (!serverName.trim()) return null
+  const target = serverName.trim()
+  for (const [, entry] of runtimeHandles) {
+    if (entry.handle.server && entry.handle.serverName === target) {
+      return entry.handle.server
+    }
+  }
+  return null
+}
 
 /** Active plat OpenAPI client for the current playground target (css:// or http(s)://). */
 let playgroundClient: { baseUrl: string; client: OpenAPIClient } | null = null
@@ -153,6 +215,14 @@ const pendingServerRequests = new Map<string, Map<string, {
   input: Record<string, unknown>
   startedAt: number
 }>>()
+
+function debugRuntime(event: string, detail?: unknown): void {
+  if (detail === undefined) {
+    console.debug(`[RuntimeStore] ${event}`)
+    return
+  }
+  console.debug(`[RuntimeStore] ${event}`, detail)
+}
 
 let highlightTimer: number | null = null
 const RECENT_CLIENT_TARGETS_KEY = 'browserver:recent-client-targets'
@@ -301,6 +371,18 @@ function recordRuntimeTelemetry(
   const requestId = message.id == null ? null : String(message.id)
   if (!requestId) return
 
+  debugRuntime('telemetry.event', {
+    direction,
+    pane,
+    filePath,
+    requestId,
+    method: typeof message.method === 'string' ? message.method : undefined,
+    path: typeof message.path === 'string' ? message.path : undefined,
+    ok: message.ok,
+    hasError: Boolean(message.error),
+    payload: message,
+  })
+
   const pending = pendingServerRequests.get(filePath) ?? new Map<string, {
     operationId: string
     operationLabel?: string
@@ -325,6 +407,17 @@ function recordRuntimeTelemetry(
       startedAt: Date.now(),
     })
 
+    debugRuntime('telemetry.request.tracked', {
+      pane,
+      filePath,
+      requestId,
+      operationId: operation.operationId,
+      operationLabel: operation.operationLabel,
+      method: operation.method,
+      path: operation.path,
+      pendingCountForFile: pending.size,
+    })
+
     setHighlightedHandler(set, operation.operationId)
     set({
       logs: [
@@ -336,7 +429,16 @@ function recordRuntimeTelemetry(
   }
 
   const request = pending.get(requestId)
-  if (!request) return
+  if (!request) {
+    debugRuntime('telemetry.response.unmatched', {
+      pane,
+      filePath,
+      requestId,
+      pendingIds: Array.from(pending.keys()),
+      payload: message,
+    })
+    return
+  }
   pending.delete(requestId)
 
   const endedAt = Date.now()
@@ -375,6 +477,20 @@ function recordRuntimeTelemetry(
       logEntry(ok ? 'info' : 'error', `${ok ? 'Completed' : 'Failed'} ${entry.operationLabel ?? entry.operationId}`, ok ? entry.result : entry.error),
       ...get().logs,
     ].slice(0, 200),
+  })
+
+  debugRuntime('telemetry.response.recorded', {
+    pane,
+    filePath,
+    requestId,
+    operationId: entry.operationId,
+    operationLabel: entry.operationLabel,
+    method: entry.method,
+    path: entry.path,
+    ok,
+    durationMs: entry.durationMs,
+    error: entry.error,
+    pendingCountForFile: pending.size,
   })
 }
 
@@ -497,6 +613,12 @@ function updateTabSession(
   }
 }
 
+function normalizeLegacyPlatClientImports(source: string): string {
+  return source
+    .replaceAll('@modularizer/plat/client-server', '@modularizer/plat-client/client-server')
+    .replace(/@modularizer\/plat\/client(?!-)/g, '@modularizer/plat-client')
+}
+
 export const useRuntimeStore = create<RuntimeState>()((set, get) => ({
   activeRuntimePane: 'primary',
   tabSessions: {},
@@ -581,8 +703,9 @@ export const useRuntimeStore = create<RuntimeState>()((set, get) => ({
 
         const handle = workspace.sample.serverLanguage === 'typescript'
           ? await startLocalTsRuntime({
-              source: targetFile.content,
+              source: normalizeLegacyPlatClientImports(targetFile.content),
               serverName: `${workspace.sample.id}-${pane}-${targetFile.name.replace(/[^a-zA-Z0-9_-]/g, '-')}`,
+              workspaceFiles: workspace.files.map(f => ({ path: f.path, content: f.content })),
               onRequest: (direction, payload) => {
                 recordRuntimeTelemetry(set, get, targetFile.path, pane, direction, payload)
               },

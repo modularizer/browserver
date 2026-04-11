@@ -3,7 +3,7 @@ import * as monaco from 'monaco-editor'
 let configured = false
 
 const packageDeclarations = `
-declare module '@modularizer/plat/client-server' {
+declare module '@modularizer/plat-client/client-server' {
   export type ControllerClass = new () => any
 
   export interface ClientSideServerDefinition {
@@ -91,6 +91,21 @@ declare module '@modularizer/plat/client-server' {
      source: Record<string, string>,
      options?: { serverName?: string; undecoratedMode?: 'GET' | 'POST' | 'private'; sourceEntryPoint?: string }
    ): Promise<StartedClientSideServer>
+
+   export interface ClientSideServerChannel {
+     send(message: unknown): void | Promise<void>
+     subscribe(listener: (message: unknown) => void | Promise<void>): () => void
+     close?(): void | Promise<void>
+   }
+
+   export interface PlatFetchOptions {
+     channel: ClientSideServerChannel
+     interceptBase?: string
+   }
+
+   export function createPlatFetch(options: PlatFetchOptions): typeof globalThis.fetch
+   export function patchGlobalFetch(options: PlatFetchOptions): () => void
+   export function generateBridgeScript(): string
  }
 
  declare module '@modularizer/plat-client' {
@@ -126,6 +141,68 @@ declare module 'plat' {
     controllers: unknown[],
   ): unknown
 }
+
+declare module '@modularizer/plat-client/static' {
+  export interface FileResponseOpts {
+    contentType?: string
+    maxAge?: number
+    headers?: Record<string, string>
+  }
+
+  export class FileResponse {
+    readonly kind: 'path' | 'content'
+    readonly source: string | Uint8Array
+    readonly filename: string
+    readonly contentType: string
+    readonly maxAge?: number
+    readonly headers: Record<string, string>
+    static from(path: string): FileResponse
+    static from(content: string | Uint8Array, filename: string, opts?: FileResponseOpts): FileResponse
+    getContent(): Promise<string | Uint8Array>
+  }
+
+  export function isFileResponse(value: unknown): value is FileResponse
+
+  export interface StaticFolderOpts {
+    exclude?: string[]
+    maxAge?: number
+    headers?: Record<string, string>
+    dotfiles?: 'ignore' | 'allow' | 'deny'
+    onDirectory?: 'none' | 'index' | 'list' | 'directory' | ((files: string[]) => FileResponse | Promise<FileResponse>)
+    index?: string
+  }
+
+  export interface VirtualFileSystem {
+    list(path: string): string[] | Promise<string[]>
+    read(path: string): string | Uint8Array | null | Promise<string | Uint8Array | null>
+  }
+
+  export type MemoryFileEntry = string | Uint8Array | { read(): string | Uint8Array | Promise<string | Uint8Array> }
+
+  export class MemoryFileSystem implements VirtualFileSystem {
+    constructor(files: Record<string, MemoryFileEntry>)
+    list(path: string): string[]
+    read(path: string): string | Uint8Array | null
+  }
+
+  export class StaticFolder {
+    constructor(directory: string, opts?: StaticFolderOpts)
+    constructor(files: Record<string, MemoryFileEntry>, opts?: StaticFolderOpts)
+    constructor(vfs: VirtualFileSystem, opts?: StaticFolderOpts)
+    resolve(subPath: string): Promise<FileResponse | null>
+  }
+
+  export function isStaticFolder(value: unknown): value is StaticFolder
+  export function getMimeType(filename: string): string
+  export function isExcluded(path: string, patterns: string[]): boolean
+}
+
+declare module '@modularizer/plat/static' {
+  export * from '@modularizer/plat-client/static'
+}
+
+/** Workspace files injected by browserver at runtime, usable with StaticFolder */
+declare const __workspaceFiles: Record<string, string>
 
 declare module '@browserver/core' {
   export interface Workspace {

@@ -21,8 +21,9 @@
     "node": ">=20.0.0"
   },
   "dependencies": {
-    "isomorphic-git": "^1.25.7",
-    "@isomorphic-git/lightning-fs": "^4.6.2"
+    "@isomorphic-git/lightning-fs": "^4.6.2",
+    "@modularizer/plat-client": "^0.9.0",
+    "isomorphic-git": "^1.25.7"
   },
   "devDependencies": {
     "@types/react": "^18.3.12",

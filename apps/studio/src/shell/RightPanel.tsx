@@ -333,6 +333,67 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   )
 }
 
+function isFileResult(value: unknown): value is { _type: 'file'; filename: string; contentType: string; content: string; headers?: Record<string, string> } {
+  return value != null && typeof value === 'object' && (value as any)._type === 'file'
+}
+
+function FileOrJsonResult({ value }: { value: unknown }) {
+  if (isFileResult(value)) {
+    const { filename, contentType, content } = value
+    if (contentType.startsWith('image/')) {
+      return (
+        <div className="p-2">
+          <div className="text-[10px] text-bs-text-faint mb-1">{filename}</div>
+          <img src={`data:${contentType};base64,${content}`} alt={filename} className="max-w-full max-h-40 rounded" />
+        </div>
+      )
+    }
+    if (contentType === 'text/html') {
+      return (
+        <div className="p-2">
+          <div className="text-[10px] text-bs-text-faint mb-1">{filename}</div>
+          <iframe
+            srcDoc={atob(content)}
+            className="w-full h-40 rounded border border-bs-border bg-white"
+            sandbox="allow-scripts"
+            title={filename}
+          />
+        </div>
+      )
+    }
+    // Text-based files: decode and show as text
+    if (contentType.startsWith('text/') || contentType === 'application/json' || contentType === 'application/javascript') {
+      let decoded: string
+      try { decoded = atob(content) } catch { decoded = content }
+      return (
+        <div className="p-2">
+          <div className="text-[10px] text-bs-text-faint mb-1">{filename}</div>
+          <pre className="text-[10px] text-bs-text-muted overflow-auto max-h-40 whitespace-pre-wrap">{decoded}</pre>
+        </div>
+      )
+    }
+    // Binary: download link
+    return (
+      <div className="p-2">
+        <div className="text-[10px] text-bs-text-faint mb-1">{filename} ({contentType})</div>
+        <a
+          href={`data:${contentType};base64,${content}`}
+          download={filename}
+          className="text-[10px] text-bs-accent underline"
+        >
+          Download
+        </a>
+      </div>
+    )
+  }
+
+  return (
+    <pre className="p-2 text-[10px] text-bs-text-muted overflow-auto max-h-40 whitespace-pre-wrap">
+      {JSON.stringify(value, null, 2)}
+    </pre>
+  )
+}
+
 function OperationItem({
   operation,
   draft,
@@ -400,9 +461,7 @@ function OperationItem({
                  <span>Result</span>
                  <span>{new Date(latestRequest.endedAt).toLocaleTimeString()}</span>
                </div>
-               <pre className="p-2 text-[10px] text-bs-text-muted overflow-auto max-h-40 whitespace-pre-wrap">
-                 {JSON.stringify(latestRequest.ok ? latestRequest.result : latestRequest.error, null, 2)}
-               </pre>
+               <FileOrJsonResult value={latestRequest.ok ? latestRequest.result : latestRequest.error} />
             </div>
           )}
         </div>

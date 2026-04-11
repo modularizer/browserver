@@ -32,6 +32,7 @@ export type EditorViewId =
   | 'calls'
   | 'build'
   | 'problems'
+  | 'browser'
 export interface EditorPaneTabs {
   tabs: string[]
   activePath: string | null
@@ -64,6 +65,7 @@ export const editorViewDefinitions: Array<{ id: EditorViewId; label: string }> =
   { id: 'calls', label: 'Calls' },
   { id: 'build', label: 'Build' },
   { id: 'problems', label: 'Problems' },
+  { id: 'browser', label: 'Browser' },
 ]
 
 interface WorkspaceState {

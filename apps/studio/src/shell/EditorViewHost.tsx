@@ -3,6 +3,13 @@ import * as monaco from 'monaco-editor'
 import SwaggerUI from 'swagger-ui-react'
 import 'swagger-ui-react/swagger-ui.css'
 import { RedocStandalone } from 'redoc'
+import {
+  createClientSideServerMQTTWebRTCPeerPool,
+  createPlatFetch,
+  generateBridgeScript,
+  parseClientSideServerAddress,
+} from '@modularizer/plat-client/client-server'
+import type { ClientSideServerChannel } from '@modularizer/plat-client/client-server'
 import type { DatabaseSnapshot } from '@browserver/database'
 import type { WorkspaceSnapshot } from '@browserver/storage'
 import type { ProjectBundle } from '../config/projectBundle'
@@ -13,8 +20,13 @@ import { HistoryPanel } from './HistoryPanel'
 import { TrustPanel } from './TrustPanel'
 import { useCheckpointStore } from '../store/checkpoints'
 import { useDatabaseStore } from '../store/database'
-import { layoutPresets, useLayoutStore } from '../store/layout'
-import { useRuntimeStore } from '../store/runtime'
+import { useLayoutStore } from '../store/layout'
+import {
+  useRuntimeStore,
+  getRuntimeServerForConnectionUrl,
+  getRuntimeServerForServerName,
+} from '../store/runtime'
+import { createInProcessChannel } from '../runtime/inProcessChannel'
 import { useThemeStore } from '../theme'
 import {
   getEditorViewId,
@@ -39,6 +51,7 @@ export function EditorViewHost({ path }: EditorViewHostProps) {
   if (viewId === 'calls') return <CallsView />
   if (viewId === 'build') return <BuildView />
   if (viewId === 'problems') return <ProblemsView />
+  if (viewId === 'browser') return <BrowserView />
 
   return (
     <div className="flex h-full items-center justify-center text-sm text-bs-text-faint">
@@ -929,6 +942,409 @@ function ProblemsView() {
           <div className="text-bs-text-faint">No compile problems</div>
         )}
       </div>
+    </div>
+  )
+}
+
+function BrowserView() {
+  const tabSessions = useRuntimeStore((state) => state.tabSessions)
+  const connectionUrl = useRuntimeStore((state) => state.connectionUrl)
+  const iframeRef = useRef<HTMLIFrameElement>(null)
+  const channelRef = useRef<ClientSideServerChannel | null>(null)
+  const connectedUrlRef = useRef<string | null>(null)
+  const peerPoolRef = useRef<Awaited<ReturnType<typeof createClientSideServerMQTTWebRTCPeerPool>> | null>(null)
+  const activeBlobUrlRef = useRef<string | null>(null)
+  const [browserUrl, setBrowserUrl] = useState('/')
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const debugBrowser = (event: string, detail?: unknown) => {
+    if (detail === undefined) {
+      console.debug(`[BrowserView] ${event}`)
+      return
+    }
+    console.debug(`[BrowserView] ${event}`, detail)
+  }
+
+  const hasRunningServer = Object.values(tabSessions).some((session) => (
+    session.mode === 'server' && session.status === 'running'
+  ))
+
+  const parseBrowserTarget = (rawInput: string): {
+    connectionUrl: string | null
+    requestPath: string | null
+    normalizedUrl: string | null
+  } => {
+    const trimmed = rawInput.trim()
+    if (!trimmed.startsWith('css://')) {
+      return { connectionUrl: null, requestPath: null, normalizedUrl: null }
+    }
+
+    try {
+      const parsed = new URL(trimmed)
+      const server = parsed.host || parsed.pathname.replace(/^\/+/, '')
+      if (!server) {
+        return { connectionUrl: null, requestPath: null, normalizedUrl: null }
+      }
+
+      const connectionTarget = `css://${server}`
+      const pathPart = parsed.pathname || '/'
+      const requestPath = `${pathPart}${parsed.search}`
+      const normalizedUrl = `${connectionTarget}${pathPart}${parsed.search}`
+      return { connectionUrl: connectionTarget, requestPath, normalizedUrl }
+    } catch {
+      return { connectionUrl: null, requestPath: null, normalizedUrl: null }
+    }
+  }
+
+  async function closeChannel(): Promise<void> {
+    debugBrowser('channel.close.start', {
+      connectedUrl: connectedUrlRef.current,
+      hasChannel: Boolean(channelRef.current),
+    })
+    if (channelRef.current && typeof channelRef.current.close === 'function') {
+      await channelRef.current.close()
+    }
+    channelRef.current = null
+    connectedUrlRef.current = null
+    debugBrowser('channel.close.done')
+  }
+
+  async function ensureChannel(preferredConnectionUrl?: string | null) {
+    const targetConnectionUrl = preferredConnectionUrl ?? connectedUrlRef.current
+    if (!targetConnectionUrl || !targetConnectionUrl.startsWith('css://')) return null
+
+    debugBrowser('channel.ensure.start', {
+      targetConnectionUrl,
+      currentlyConnectedUrl: connectedUrlRef.current,
+      hasExistingChannel: Boolean(channelRef.current),
+    })
+
+    if (channelRef.current && connectedUrlRef.current === targetConnectionUrl) return channelRef.current
+    if (channelRef.current && connectedUrlRef.current !== targetConnectionUrl) {
+      await closeChannel()
+    }
+
+    if (!peerPoolRef.current) {
+      peerPoolRef.current = createClientSideServerMQTTWebRTCPeerPool()
+    }
+
+    const address = parseClientSideServerAddress(targetConnectionUrl)
+    const session = await peerPoolRef.current.connect(address)
+    channelRef.current = session
+    connectedUrlRef.current = targetConnectionUrl
+    debugBrowser('channel.ensure.connected', {
+      targetConnectionUrl,
+      transport: 'mqtt-webrtc',
+    })
+    return session
+  }
+
+  const clearActiveBlobUrl = () => {
+    if (!activeBlobUrlRef.current) return
+    URL.revokeObjectURL(activeBlobUrlRef.current)
+    activeBlobUrlRef.current = null
+  }
+
+  const ensurePlatFetch = async (preferredConnectionUrl?: string | null): Promise<typeof fetch | null> => {
+    const targetConnectionUrl = preferredConnectionUrl ?? connectedUrlRef.current
+    if (!targetConnectionUrl || !targetConnectionUrl.startsWith('css://')) return null
+
+    const targetServerName = (() => {
+      try {
+        const parsed = new URL(targetConnectionUrl)
+        return parsed.host || parsed.pathname.replace(/^\/+/, '')
+      } catch {
+        return ''
+      }
+    })()
+
+    // Prefer in-process server for the exact target URL or server name.
+    const inProcessServer = getRuntimeServerForConnectionUrl(targetConnectionUrl)
+      ?? (targetServerName ? getRuntimeServerForServerName(targetServerName) : null)
+    debugBrowser('fetch.ensure.start', {
+      targetConnectionUrl,
+      targetServerName,
+      inProcessServerFound: Boolean(inProcessServer),
+    })
+    if (inProcessServer) {
+      connectedUrlRef.current = targetConnectionUrl
+      const channel = createInProcessChannel(inProcessServer)
+      debugBrowser('fetch.ensure.selected', {
+        targetConnectionUrl,
+        mode: 'in-process',
+        createPlatFetchAvailable: true,
+      })
+      return createPlatFetch({ channel })
+    }
+
+    // Remote server path via MQTT+WebRTC.
+    const channel = channelRef.current ?? await ensureChannel(targetConnectionUrl)
+    if (!channel) return null
+    debugBrowser('fetch.ensure.selected', {
+      targetConnectionUrl,
+      mode: 'remote-channel',
+      createPlatFetchAvailable: true,
+    })
+    return createPlatFetch({ channel })
+  }
+
+  const navigate = async (path: string) => {
+    const traceId = crypto.randomUUID().slice(0, 8)
+    debugBrowser('navigate.start', { traceId, input: path })
+    const target = parseBrowserTarget(path)
+    debugBrowser('navigate.parsed', { traceId, target })
+
+    if (!target.connectionUrl || !target.requestPath) {
+      setError('Enter a full css://server-name/path address in the URL bar.')
+      debugBrowser('navigate.invalid-target', { traceId, path })
+      return
+    }
+
+    if (target.normalizedUrl) {
+      setBrowserUrl(target.normalizedUrl)
+    }
+
+    const platFetch = await ensurePlatFetch(target.connectionUrl)
+    if (!platFetch) {
+      setError(`Unable to connect to ${target.connectionUrl}.`)
+      debugBrowser('navigate.no-fetch', { traceId, targetConnectionUrl: target.connectionUrl })
+      return
+    }
+
+    setLoading(true)
+    setError(null)
+
+    try {
+      const response = await platFetch(target.requestPath)
+      debugBrowser('navigate.response', {
+        traceId,
+        requestPath: target.requestPath,
+        ok: response.ok,
+        status: response.status,
+        statusText: response.statusText,
+        contentType: response.headers.get('content-type') || '',
+      })
+
+      if (!response.ok) {
+        setError(`${response.status} ${response.statusText}`)
+        setLoading(false)
+        debugBrowser('navigate.response.error', { traceId, status: response.status, statusText: response.statusText })
+        return
+      }
+
+      const contentType = response.headers.get('content-type') || ''
+      if (!contentType.includes('text/html')) {
+        clearActiveBlobUrl()
+        const text = await response.text()
+        const blob = new Blob([text], { type: contentType })
+        const blobUrl = URL.createObjectURL(blob)
+        activeBlobUrlRef.current = blobUrl
+        if (iframeRef.current) {
+          iframeRef.current.srcdoc = ''
+          iframeRef.current.src = blobUrl
+        }
+        debugBrowser('navigate.render.blob', { traceId, contentType })
+        setLoading(false)
+        return
+      }
+
+      clearActiveBlobUrl()
+      const html = injectBridgeScript(await response.text())
+      if (iframeRef.current) {
+        iframeRef.current.src = 'about:blank'
+        iframeRef.current.srcdoc = html
+      }
+      debugBrowser('navigate.render.html', { traceId, bridgeInjected: true })
+      setLoading(false)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+      debugBrowser('navigate.exception', {
+        traceId,
+        error: err instanceof Error ? { message: err.message, stack: err.stack } : String(err),
+      })
+      setLoading(false)
+    }
+  }
+
+  const injectBridgeScript = (html: string): string => {
+    const bridgeScript = `<script>${generateBridgeScript()}</script>`
+    if (html.includes('<head>')) {
+      return html.replace('<head>', `<head>${bridgeScript}`)
+    }
+    if (html.includes('</head>')) {
+      return html.replace('</head>', `${bridgeScript}</head>`)
+    }
+    if (html.includes('<html>')) {
+      return html.replace('<html>', `<html><head>${bridgeScript}</head>`)
+    }
+    return bridgeScript + html
+  }
+
+  const encodeResponseBody = async (response: Response): Promise<ArrayBuffer> => {
+    return await response.arrayBuffer()
+  }
+
+  const encodeJsonBody = (value: unknown): ArrayBuffer => {
+    return new TextEncoder().encode(JSON.stringify(value)).buffer
+  }
+
+  // Auto-navigate on mount or server restart
+  useEffect(() => {
+    if (hasRunningServer && browserUrl.trim().startsWith('css://')) {
+      const timer = setTimeout(() => navigate(browserUrl), 200)
+      return () => clearTimeout(timer)
+    }
+  }, [hasRunningServer, browserUrl])
+
+  // Create in-process channel whenever any server tab is running.
+  useEffect(() => {
+    if (!hasRunningServer) {
+      clearActiveBlobUrl()
+      void closeChannel()
+      return
+    }
+
+    return () => {
+      clearActiveBlobUrl()
+      void closeChannel()
+    }
+  }, [hasRunningServer])
+
+  useEffect(() => {
+    if (!connectionUrl?.startsWith('css://')) return
+    setBrowserUrl((current) => (current.trim().startsWith('css://') ? current : `${connectionUrl}/`))
+  }, [connectionUrl])
+
+  // Handle bridge requests emitted by plat's generated iframe script.
+  useEffect(() => {
+    const handler = async (event: MessageEvent) => {
+      const data = event.data
+      if (!data || data.type !== 'plat-fetch') return
+
+      if (event.source !== iframeRef.current?.contentWindow) return
+      const replyTarget = event.source as Window
+
+      const platFetch = await ensurePlatFetch()
+      if (!platFetch) {
+        debugBrowser('bridge.no-server-connection', { id: data.id, path: data.path })
+        const body = encodeJsonBody({ error: 'No server connection' })
+        replyTarget.postMessage({
+          type: 'plat-fetch-response',
+          id: data.id,
+          ok: false,
+          status: 503,
+          statusText: 'No server connection',
+          contentType: 'application/json',
+          body,
+          headers: {},
+        }, '*', [body])
+        return
+      }
+
+      try {
+        const response = await platFetch(data.path, {
+          method: data.method,
+          headers: data.headers,
+          body: data.body,
+        })
+
+        debugBrowser('bridge.response', {
+          id: data.id,
+          ok: response.ok,
+          status: response.status,
+          statusText: response.statusText,
+          contentType: response.headers.get('content-type') || '',
+        })
+
+        const respHeaders: Record<string, string> = {}
+        response.headers.forEach((v, k) => { respHeaders[k] = v })
+
+        const body = await encodeResponseBody(response)
+        replyTarget.postMessage({
+          type: 'plat-fetch-response',
+          id: data.id,
+          ok: response.ok,
+          status: response.status,
+          statusText: response.statusText,
+          contentType: response.headers.get('content-type') || 'application/octet-stream',
+          body,
+          headers: respHeaders,
+        }, '*', [body])
+      } catch (err) {
+        debugBrowser('bridge.exception', {
+          id: data.id,
+          error: err instanceof Error ? { message: err.message, stack: err.stack } : String(err),
+        })
+        const body = encodeJsonBody({ error: String(err) })
+        replyTarget.postMessage({
+          type: 'plat-fetch-response',
+          id: data.id,
+          ok: false,
+          status: 500,
+          statusText: err instanceof Error ? err.message : 'Unknown error',
+          contentType: 'application/json',
+          body,
+          headers: {},
+        }, '*', [body])
+      }
+    }
+
+    window.addEventListener('message', handler)
+    return () => window.removeEventListener('message', handler)
+  }, [])
+
+
+  return (
+    <div className="flex h-full flex-col bg-bs-bg-panel">
+      {/* URL bar */}
+      <div className="flex items-center gap-2 border-b border-bs-border px-3 py-2">
+        <button
+          onClick={() => navigate(browserUrl)}
+          className="rounded bg-bs-bg-hover px-2 py-1 text-[11px] text-bs-text hover:bg-bs-border"
+          title="Reload"
+        >
+          {loading ? '...' : '\u21BB'}
+        </button>
+        <input
+          type="text"
+          value={browserUrl}
+          onChange={(e) => setBrowserUrl(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') navigate(browserUrl)
+          }}
+          className="flex-1 rounded border border-bs-border bg-bs-bg-sidebar px-2 py-1 font-mono text-[11px] text-bs-text outline-none focus:border-bs-border-focus"
+          placeholder="css://server-name/path"
+        />
+        <button
+          onClick={() => navigate(browserUrl)}
+          className="rounded bg-bs-good px-3 py-1 text-[11px] font-medium text-bs-accent-text hover:opacity-90"
+        >
+          Go
+        </button>
+      </div>
+
+      {/* Error display */}
+      {error && (
+        <div className="border-b border-bs-border bg-red-500/10 px-3 py-2 text-[11px] text-bs-error">
+          {error}
+        </div>
+      )}
+
+      {/* Not running state */}
+      {!hasRunningServer && (
+        <div className="flex flex-1 items-center justify-center text-[12px] text-bs-text-faint">
+          Start a server with a StaticFolder to preview it here
+        </div>
+      )}
+
+      {/* Iframe */}
+      <iframe
+        ref={iframeRef}
+        className={`flex-1 border-0 bg-white ${!hasRunningServer ? 'hidden' : ''}`}
+        sandbox="allow-scripts allow-same-origin"
+        title="Browser Preview"
+      />
     </div>
   )
 }

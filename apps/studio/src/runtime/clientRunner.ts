@@ -29,7 +29,7 @@ export async function runClientSource(options: {
   const module = { exports: {} as Record<string, unknown> }
 
   const require = (specifier: string) => {
-    if (specifier === '@modularizer/plat-client/client-server' || specifier === '@modularizer/plat-client' || specifier === '@modularizer/plat/client-server' || specifier === '@modularizer/plat/client') {
+    if (specifier === '@modularizer/plat-client/client-server' || specifier === '@modularizer/plat-client' || specifier === '@modularizer/plat-client/client-server' || specifier === '@modularizer/plat-client') {
       return {
         OpenAPIClient: LocalOpenAPIClient,
       }
