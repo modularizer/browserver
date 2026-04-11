@@ -2,18 +2,17 @@ import React from 'react'
 import { createRoot } from 'react-dom/client'
 import { App } from './App'
 import { SiteViewer } from './SiteViewer'
+import { parseStudioRoute } from './routing/studioRoute'
 import './index.css'
 
-// Route: /site/:serverName renders the site viewer (full-page, no IDE chrome)
-// Everything else renders the normal IDE
 function Root() {
-  const path = window.location.pathname
-  // Handle both /site/name and /browserver/site/name (GitHub Pages prefix)
-  const siteMatch = path.match(/\/site\/([^/]+)/)
-  if (siteMatch) {
-    return <SiteViewer serverName={siteMatch[1]!} />
+  const route = parseStudioRoute(window.location.pathname, import.meta.env.BASE_URL)
+
+  if (route.mode === 'preview' && route.serverName) {
+    return <SiteViewer serverName={route.serverName} />
   }
-  return <App />
+
+  return <App initialProjectId={route.projectName ?? undefined} />
 }
 
 createRoot(document.getElementById('root')!).render(

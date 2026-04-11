@@ -5,7 +5,7 @@ import {
 } from '../runtime/localTsRuntime'
 import { runClientSource } from '../runtime/clientRunner'
 import { startPythonRuntime } from '../runtime/pythonRuntime'
-import { normalizeClientApiBaseUrl, normalizeCssTargetUrl } from '../runtime/clientTargetUrl'
+import { buildCssTargetUrl, normalizeClientApiBaseUrl, normalizeCssTargetUrl, parseCssServerName } from '../runtime/clientTargetUrl'
 import { extractOperationsFromOpenApi } from '../runtime/openapiOperations'
 import { invokeOpenApiClientOperation } from '../runtime/openapiInvoke'
 import type {
@@ -170,14 +170,8 @@ export function getActiveRuntimeServer(): unknown | null {
  */
 export function getRuntimeServerForConnectionUrl(connectionUrl: string): unknown | null {
   const normalizeCssAddress = (value: string | null | undefined): string | null => {
-    if (!value || !value.startsWith('css://')) return null
-    try {
-      const parsed = new URL(value)
-      const server = parsed.host || parsed.pathname.replace(/^\/+/, '')
-      return server ? `css://${server}` : null
-    } catch {
-      return null
-    }
+    const serverName = value ? parseCssServerName(value) : null
+    return serverName ? buildCssTargetUrl(serverName) : null
   }
 
   const target = normalizeCssAddress(connectionUrl)
@@ -291,8 +285,13 @@ function persistRecentClientTargets(targets: string[]) {
 function getDefaultClientTarget(state: RuntimeState): string {
   if (state.clientTargetUrl.trim()) return state.clientTargetUrl.trim()
   if (state.connectionUrl) return state.connectionUrl
-  if (state.serverName) return `css://${state.serverName}`
+  if (state.serverName) return buildCssTargetUrl(state.serverName)
   return ''
+}
+
+function preferredServerNameForProject(projectId: string, pane: EditorPaneId): string {
+  // Keep primary-pane routing canonical as css://<project-id>.
+  return pane === 'primary' ? projectId : `${projectId}-${pane}`
 }
 
 function formatTimelineStage(entry: RuntimeRequestTimelineEntry): string {
@@ -551,7 +550,7 @@ export function selectAllServers(state: RuntimeState): ServerEntry[] {
       id: `discovered:${d.instanceId}`,
       source: 'discovered' as const,
       serverName: d.serverName,
-      connectionUrl: `css://${d.serverName}`,
+      connectionUrl: buildCssTargetUrl(d.serverName),
       status: 'unknown' as const,
       instanceInfo: d.instanceInfo,
       workerInfo: d.workerInfo,
@@ -704,7 +703,7 @@ export const useRuntimeStore = create<RuntimeState>()((set, get) => ({
         const handle = workspace.sample.serverLanguage === 'typescript'
           ? await startLocalTsRuntime({
               source: normalizeLegacyPlatClientImports(targetFile.content),
-              serverName: `${workspace.sample.id}-${pane}-${targetFile.name.replace(/[^a-zA-Z0-9_-]/g, '-')}`,
+              serverName: preferredServerNameForProject(workspace.sample.id, pane),
               workspaceFiles: workspace.files.map(f => ({ path: f.path, content: f.content })),
               onRequest: (direction, payload) => {
                 recordRuntimeTelemetry(set, get, targetFile.path, pane, direction, payload)
@@ -712,10 +711,24 @@ export const useRuntimeStore = create<RuntimeState>()((set, get) => ({
             })
           : await startPythonRuntime({
               source: targetFile.content,
-              serverName: `${workspace.sample.id}-${pane}-${targetFile.name.replace(/[^a-zA-Z0-9_-]/g, '-')}`,
+              serverName: preferredServerNameForProject(workspace.sample.id, pane),
             })
         runtimeHandles.set(targetFile.path, { pane, handle })
         playgroundClient = null
+
+        const expectedServerName = preferredServerNameForProject(workspace.sample.id, pane)
+        if (handle.serverName !== expectedServerName) {
+          set({
+            logs: [
+              logEntry('event', 'Server name differs from routed project name', {
+                expectedServerName,
+                actualServerName: handle.serverName,
+                pane,
+              }),
+              ...get().logs,
+            ].slice(0, 200),
+          })
+        }
 
         updateTabSession(set, get, targetFile.path, {
           mode: 'server',
@@ -1133,7 +1146,7 @@ export const useRuntimeStore = create<RuntimeState>()((set, get) => ({
     }
   },
   switchTarget: async (entry) => {
-    const url = entry.connectionUrl ?? `css://${entry.serverName}`
+    const url = entry.connectionUrl ?? buildCssTargetUrl(entry.serverName)
     set({ clientTargetUrl: url })
     const next = [url, ...get().recentClientTargets.filter((t) => t !== url)].slice(0, 8)
     persistRecentClientTargets(next)

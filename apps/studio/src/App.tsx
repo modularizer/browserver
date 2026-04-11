@@ -28,6 +28,10 @@ import { useTrustStore } from './store/trust'
 import { themes, useThemeStore, applyCssVariables, applyMonacoTheme } from './theme'
 import { editorViewDefinitions, getEditorItemLabel, getEditorViewId, parseBrowserYaml, useWorkspaceStore, type EditorPaneId, type EditorViewId } from './store/workspace'
 
+interface AppProps {
+  initialProjectId?: string
+}
+
 interface PendingExternalImport {
   files: File[]
   pane: EditorPaneId
@@ -299,7 +303,7 @@ function TitleBar({
   )
 }
 
-export function App() {
+export function App({ initialProjectId }: AppProps) {
   useFavicon()
   const fileInputRef = useRef<HTMLInputElement>(null)
   const externalDragDepthRef = useRef(0)
@@ -319,6 +323,7 @@ export function App() {
   const [pendingArchiveImport, setPendingArchiveImport] = useState<PendingArchiveImport | null>(null)
   const [pendingRunningTabClose, setPendingRunningTabClose] = useState<PendingRunningTabClose | null>(null)
   const [externalFileDragActive, setExternalFileDragActive] = useState(false)
+  const [routeNotice, setRouteNotice] = useState<string | null>(null)
   const sidebarWidth = useLayoutStore((state) => state.sidebarWidth)
   const bottomHeight = useLayoutStore((state) => state.bottomHeight)
   const rightWidth = useLayoutStore((state) => state.rightWidth)
@@ -387,6 +392,33 @@ export function App() {
     showRight,
   }
   const syncBrowserYaml = useWorkspaceStore((state) => state.syncBrowserYaml)
+
+  useEffect(() => {
+    if (!hydrated || !initialProjectId || sample.id === initialProjectId) return
+
+    let cancelled = false
+
+    void (async () => {
+      const snapshots = await listWorkspaceSnapshots()
+      if (cancelled) return
+      const hasProject = snapshots.some((snapshot) => snapshot.id === initialProjectId)
+        || samples.some((entry) => entry.id === initialProjectId)
+
+      if (hasProject) {
+        await setSample(initialProjectId)
+        if (!cancelled) {
+          setRouteNotice(null)
+        }
+        return
+      }
+
+      setRouteNotice(`Route requested project "${initialProjectId}", but no local project matched it.`)
+    })()
+
+    return () => {
+      cancelled = true
+    }
+  }, [hydrated, initialProjectId, sample.id, setSample])
 
   const buildCurrentBundle = (): ProjectBundle => {
     const workspace: WorkspaceSnapshot = {
@@ -1143,6 +1175,11 @@ export function App() {
         onDeleteAllData={() => setDeleteAllConfirmOpen(true)}
         onOpenWelcome={() => setWelcomeForceOpen(true)}
       />
+      {routeNotice ? (
+        <div className="border-b border-bs-border bg-bs-bg-hover px-3 py-1 text-[10px] text-bs-text-faint">
+          {routeNotice}
+        </div>
+      ) : null}
       <input
         ref={fileInputRef}
         type="file"
