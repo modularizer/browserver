@@ -76,6 +76,72 @@ function setStatus(text: string, isError = false): void {
   el.classList.toggle('error', isError)
 }
 
+const FALLBACK_FAVICON_PATH = '/sample-favicon.svg'
+const IMPLICIT_FAVICON_CANDIDATES = [
+  '/favicon.ico',
+  '/favicon.svg',
+  '/favicon.png',
+]
+
+function ensureHead(): HTMLHeadElement {
+  if (document.head) return document.head
+  const head = document.createElement('head')
+  const html = document.documentElement
+  if (html.firstChild) {
+    html.insertBefore(head, html.firstChild)
+  } else {
+    html.appendChild(head)
+  }
+  return head
+}
+
+function upsertFaviconLink(href: string, type?: string): void {
+  const head = ensureHead()
+  let link = head.querySelector('link[rel~="icon"]') as HTMLLinkElement | null
+  if (!link) {
+    link = document.createElement('link')
+    link.rel = 'icon'
+    head.appendChild(link)
+  }
+  if (type) link.type = type
+  link.href = href
+}
+
+function hasExplicitFavicon(): boolean {
+  return !!document.head?.querySelector('link[rel~="icon"]')
+}
+
+async function findImplicitFavicon(): Promise<{ href: string; type?: string } | null> {
+  for (const href of IMPLICIT_FAVICON_CANDIDATES) {
+    try {
+      const response = await fetch(href, {
+        method: 'GET',
+        credentials: 'same-origin',
+        cache: 'default',
+      })
+      if (!response.ok) continue
+      const contentType = (response.headers.get('content-type') || '').toLowerCase()
+      if (contentType.startsWith('image/')) {
+        return { href, type: contentType }
+      }
+    } catch {
+      // Ignore and try the next common filename.
+    }
+  }
+  return null
+}
+
+async function ensureDocumentFavicon(): Promise<void> {
+  if (hasExplicitFavicon()) return
+  const implicit = await findImplicitFavicon()
+  if (hasExplicitFavicon()) return
+  if (implicit) {
+    upsertFaviconLink(implicit.href, implicit.type)
+    return
+  }
+  upsertFaviconLink(FALLBACK_FAVICON_PATH, 'image/svg+xml')
+}
+
 const connections = new Map<string, Promise<BrowserverCssFetchConnection>>()
 function getConnection(serverName: string): Promise<BrowserverCssFetchConnection> {
   let existing = connections.get(serverName)
@@ -179,7 +245,7 @@ async function ensureServiceWorkerControlling(): Promise<void> {
   await new Promise(() => {})
 }
 
-function renderHtmlDocument(html: string): void {
+async function renderHtmlDocument(html: string): Promise<void> {
   // document.open/write/close re-parses the HTML, which re-executes inline
   // and external <script> tags natively. The document URL stays at the
   // navigation URL, so relative and root-absolute subresource requests
@@ -191,25 +257,14 @@ function renderHtmlDocument(html: string): void {
   document.close()
 
   // After render, ensure favicon is present
-  try {
-    const hasFavicon = !!document.head.querySelector('link[rel~="icon"]')
-    if (!hasFavicon) {
-      const link = document.createElement('link')
-      link.rel = 'icon'
-      link.type = 'image/svg+xml'
-      link.href = '/sample-favicon.svg'
-      document.head.appendChild(link)
-    }
-  } catch (e) {
-    // ignore
-  }
+  await ensureDocumentFavicon()
 }
 
 async function renderResponse(response: Response): Promise<void> {
   const contentType = (response.headers.get('content-type') || '').toLowerCase()
 
   if (contentType.startsWith('text/html')) {
-    renderHtmlDocument(await response.text())
+    await renderHtmlDocument(await response.text())
     return
   }
 
@@ -221,27 +276,27 @@ async function renderResponse(response: Response): Promise<void> {
   const blobUrl = URL.createObjectURL(blob)
 
   if (contentType.startsWith('image/')) {
-    renderHtmlDocument(`<!doctype html><html><head><style>
+    await renderHtmlDocument(`<!doctype html><html><head><style>
 html,body{margin:0;height:100%;background:#000;display:flex;align-items:center;justify-content:center}
 img{max-width:100vw;max-height:100vh;object-fit:contain}
 </style></head><body><img src="${blobUrl}"></body></html>`)
     return
   }
   if (contentType.startsWith('video/')) {
-    renderHtmlDocument(`<!doctype html><html><body><video src="${blobUrl}" controls></video></body></html>`)
+    await renderHtmlDocument(`<!doctype html><html><body><video src="${blobUrl}" controls></video></body></html>`)
     return
   }
   if (contentType.startsWith('audio/')) {
-    renderHtmlDocument(`<!doctype html><html><body><audio src="${blobUrl}" controls></audio></body></html>`)
+    await renderHtmlDocument(`<!doctype html><html><body><audio src="${blobUrl}" controls></audio></body></html>`)
     return
   }
   if (contentType.startsWith('text/') || contentType.includes('json') || contentType.includes('xml')) {
     const text = await blob.text()
     const escaped = text.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]!))
-    renderHtmlDocument(`<!doctype html><html><body><pre>${escaped}</pre></body></html>`)
+    await renderHtmlDocument(`<!doctype html><html><body><pre>${escaped}</pre></body></html>`)
     return
   }
-  renderHtmlDocument(`<!doctype html><html><body><embed src="${blobUrl}" type="${contentType}"></body></html>`)
+  await renderHtmlDocument(`<!doctype html><html><body><embed src="${blobUrl}" type="${contentType}"></body></html>`)
 }
 
 async function main(): Promise<void> {
