@@ -82,28 +82,38 @@ function getConnection(serverName: string): Promise<BrowserverCssFetchConnection
   if (existing) return existing
   const pending = createBrowserverCssFetchConnection(`css://${serverName}`).then((conn) => {
     connections.set(conn.matchedServerName, Promise.resolve(conn))
-    conn.onPeerEvent((event) => {
+    conn.onPeerEvent(async (event) => {
       if (event === 'workspace-files-changed') {
-        console.log('[site-viewer] workspace-files-changed → purge cache + reload')
-        void purgeCacheAndReload()
+        console.log('[site-viewer] workspace-files-changed → hot swap')
+        // Fetch the fresh response behind the scenes (bypassing the SW cache)
+        // then swap the document in place — avoids the blank-reload flash.
+        try {
+          const sw = navigator.serviceWorker.controller
+          if (sw) {
+            await new Promise<void>((resolve) => {
+              const ch = new MessageChannel()
+              ch.port1.onmessage = () => resolve()
+              try { sw.postMessage({ type: 'PLAT_PURGE_CONTENT_CACHE' }, [ch.port2]) }
+              catch { resolve() }
+              setTimeout(resolve, 500)
+            })
+          }
+          const fresh = await fetch(window.location.pathname + window.location.search, {
+            method: 'GET',
+            credentials: 'same-origin',
+            cache: 'reload',
+          })
+          await renderResponse(fresh)
+        } catch (err) {
+          console.warn('[site-viewer] hot swap failed, falling back to reload', err)
+          window.location.reload()
+        }
       }
     })
     return conn
   })
   connections.set(serverName, pending)
   return pending
-}
-
-async function purgeCacheAndReload(): Promise<void> {
-  try {
-    const reg = await navigator.serviceWorker.ready
-    // Tell the SW to drop its content cache; wait briefly for it to drain.
-    reg.active?.postMessage({ type: 'PLAT_PURGE_CONTENT_CACHE' })
-    await new Promise((r) => setTimeout(r, 50))
-  } catch (err) {
-    console.warn('[site-viewer] cache purge failed', err)
-  }
-  window.location.reload()
 }
 
 function installTransportBridge(): void {
@@ -187,7 +197,7 @@ function renderHtmlDocument(html: string): void {
       const link = document.createElement('link')
       link.rel = 'icon'
       link.type = 'image/svg+xml'
-      link.href = '/favicon.svg'
+      link.href = '/sample-favicon.svg'
       document.head.appendChild(link)
     }
   } catch (e) {
@@ -257,16 +267,16 @@ async function main(): Promise<void> {
     window.history.replaceState(null, '', '/' + target.serverName + '/' + window.location.search + window.location.hash)
   }
 
-  // On a normal reload (F5 / Cmd+R) the browser marks navigation as "reload".
-  // Pass that intent to the SW via `cache: 'no-cache'` so the top-level site
-  // HTML always comes from the upstream server — subresources still hit the
-  // SWR cache for speed.
-  const navType = (performance.getEntriesByType('navigation')[0] as PerformanceNavigationTiming | undefined)?.type
-  const isReload = navType === 'reload' || navType === 'back_forward'
+  // Let the SW's stale-while-revalidate serve the cached HTML instantly and
+  // refresh it in the background. Hard-refresh (Ctrl+Shift+R) naturally
+  // propagates `cache: 'reload'`, which the SW treats as a bypass; a soft F5
+  // keeps the SWR behaviour for an instant paint. The workspace-files-changed
+  // peer event (see getConnection) triggers an auto-reload once fresh content
+  // is available, so stale-first is safe.
   const response = await fetch(window.location.pathname + window.location.search, {
     method: 'GET',
     credentials: 'same-origin',
-    cache: isReload ? 'no-cache' : 'default',
+    cache: 'default',
   })
   await renderResponse(response)
 }

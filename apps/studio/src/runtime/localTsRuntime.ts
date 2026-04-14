@@ -161,6 +161,7 @@ export async function startLocalTsRuntime(options: {
   // After updating, broadcast a peer event so any connected viewers can refresh.
   let lastFilesRef = useWorkspaceStore.getState().files
   let signalerRef: { broadcast?: (m: unknown) => Promise<void> } | null = null
+  let authorityBroadcastRef: ((m: unknown) => void) | null = null
   console.log('[LocalTsRuntime] hot-update: subscription ARMED for', options.serverName,
     'initial files:', lastFilesRef.length)
   const unsubscribeWorkspace = useWorkspaceStore.subscribe((state) => {
@@ -172,11 +173,18 @@ export async function startLocalTsRuntime(options: {
       'keys=', Array.from(keys),
       'index.html len=', typeof indexHtml === 'string' ? indexHtml.length : (indexHtml?.byteLength ?? '—'),
       'index.html head=', typeof indexHtml === 'string' ? indexHtml.slice(0, 60) : '')
-    void signalerRef?.broadcast?.({
+    const sig = signalerRef as any
+    console.log('[LocalTsRuntime] broadcasting peer event',
+      'signaler?=', !!sig,
+      'broadcast?=', typeof sig?.broadcast,
+      'channels?=', sig?.channels?.size)
+    const peerMsg = {
       platcss: 'peer',
       event: 'workspace-files-changed',
       data: { serverName: options.serverName },
-    })
+    }
+    void sig?.broadcast?.(peerMsg)
+    try { authorityBroadcastRef?.(peerMsg) } catch (err) { console.warn('[LocalTsRuntime] authority broadcast failed', err) }
   })
 
   const started = await startClientSideServerFromSource({
@@ -200,6 +208,7 @@ export async function startLocalTsRuntime(options: {
         authMode: 'public',
       })
     : null
+  if (authorityHandle) authorityBroadcastRef = authorityHandle.broadcast.bind(authorityHandle)
 
   debugLocalTsRuntime('start.ready', {
     requestedServerName: options.serverName,
@@ -360,46 +369,44 @@ function createCompatStaticExports(): StaticExports {
 
   class CompatStaticFolder {
     readonly [STATIC_FOLDER_BRAND] = true
-    private readonly files: Record<string, string | Uint8Array>
+    // Hold the source by reference so live updates to __workspaceFiles (via the
+    // workspace-store subscription in startLocalTsRuntime) are visible to each
+    // resolve() call — without this, we'd serve stale content until restart.
+    private readonly source: Record<string, unknown>
 
     constructor(source: unknown) {
-      console.debug('[CompatStaticFolder] constructor called', { sourceType: typeof source, source });
-      const out: Record<string, string | Uint8Array> = {}
-      if (source && typeof source === 'object') {
-        for (const [rawPath, rawContent] of Object.entries(source as Record<string, unknown>)) {
-          const key = rawPath.replace(/^\/+/, '')
-          if (typeof rawContent === 'string' || rawContent instanceof Uint8Array) {
-            out[key] = rawContent
-          }
-        }
-      }
-      this.files = out
-      console.debug('[CompatStaticFolder] files keys', Object.keys(this.files));
+      this.source = (source && typeof source === 'object') ? (source as Record<string, unknown>) : {}
+    }
+
+    private lookup(key: string): string | Uint8Array | null {
+      const direct = this.source[key]
+      if (typeof direct === 'string' || direct instanceof Uint8Array) return direct
+      // Tolerate callers that stored paths with a leading slash.
+      const slashed = this.source['/' + key]
+      if (typeof slashed === 'string' || slashed instanceof Uint8Array) return slashed
+      return null
+    }
+
+    private currentKeys(): string[] {
+      return Object.keys(this.source).map((k) => k.replace(/^\/+/, ''))
     }
 
     async resolve(subPath: string): Promise<CompatFileResponse | null> {
       const normalized = subPath.replace(/^\/+|\+$/g, '')
-      // Debug: log the incoming subPath and normalized key
-      console.debug('[CompatStaticFolder] resolve called:', { subPath, normalized, available: Object.keys(this.files) })
       if (!normalized) {
-        const index = this.files['index.html']
-        console.debug('[CompatStaticFolder] resolve: index.html', { found: !!index })
+        const index = this.lookup('index.html')
         return index == null ? null : CompatFileResponse.from(index, 'index.html')
       }
 
-      const exact = this.files[normalized]
-      console.debug('[CompatStaticFolder] resolve: exact lookup', { normalized, found: !!exact })
+      const exact = this.lookup(normalized)
       if (exact != null) {
         return CompatFileResponse.from(exact, normalized.split('/').pop() ?? normalized)
       }
 
       const hasExt = /\.[^/]+$/.test(normalized)
-      if (hasExt) {
-        console.debug('[CompatStaticFolder] resolve: hasExt, not found', { normalized })
-        return null
-      }
+      if (hasExt) return null
 
-      const stemMatches = Object.keys(this.files).filter((entry) => {
+      const stemMatches = this.currentKeys().filter((entry) => {
         const parent = entry.includes('/') ? entry.slice(0, entry.lastIndexOf('/')) : ''
         const requestParent = normalized.includes('/') ? normalized.slice(0, normalized.lastIndexOf('/')) : ''
         if (parent !== requestParent) return false
@@ -408,10 +415,9 @@ function createCompatStaticExports(): StaticExports {
         return stem === (normalized.split('/').pop() ?? normalized)
       })
 
-      console.debug('[CompatStaticFolder] resolve: stemMatches', { normalized, stemMatches })
       if (stemMatches.length !== 1) return null
       const matched = stemMatches[0]
-      const content = this.files[matched]
+      const content = this.lookup(matched)
       if (content == null) return null
       return CompatFileResponse.from(content, matched.split('/').pop() ?? matched)
     }

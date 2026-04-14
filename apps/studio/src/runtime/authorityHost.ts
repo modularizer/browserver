@@ -9,6 +9,7 @@ export interface AuthorityServableServer {
 
 export interface AuthorityHostRegistrationHandle {
   stop(): Promise<void>
+  broadcast(message: unknown): void
 }
 
 function getAuthorityHttpBaseUrl(): string {
@@ -85,6 +86,7 @@ export async function registerAuthorityHostedServer(options: {
   const socket = new WebSocket(getAuthorityHostWsUrl())
   const peers = new Set<RTCPeerConnection>()
   const unsubscribers = new Map<RTCPeerConnection, () => void>()
+  const channelAdapters = new Map<RTCPeerConnection, { send(msg: unknown): unknown }>()
   let stopped = false
 
   const cleanupPeer = async (peer: RTCPeerConnection) => {
@@ -108,7 +110,9 @@ export async function registerAuthorityHostedServer(options: {
       const channel = createRTCDataChannelAdapter(event.channel)
       const unsubscribe = options.server.serveChannel(channel as any)
       unsubscribers.set(peer, unsubscribe)
+      channelAdapters.set(peer, channel as any)
       event.channel.addEventListener('close', () => {
+        channelAdapters.delete(peer)
         void cleanupPeer(peer)
       }, { once: true })
     }
@@ -227,6 +231,11 @@ export async function registerAuthorityHostedServer(options: {
   await ready
 
   return {
+    broadcast(message: unknown) {
+      for (const ch of channelAdapters.values()) {
+        try { ch.send(message) } catch (err) { console.warn('[authority] broadcast failed', err) }
+      }
+    },
     async stop() {
       if (stopped) return
       stopped = true

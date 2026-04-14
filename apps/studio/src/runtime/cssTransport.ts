@@ -306,6 +306,7 @@ function attachPeerEventBus(channel: ClientSideServerChannel) {
   channel.subscribe((message) => {
     const m = message as any
     if (m && m.platcss === 'peer' && typeof m.event === 'string') {
+      console.log('[plat] peer event received:', m.event, 'handlers=', handlers.size)
       for (const h of handlers) { try { h(m.event, m.data) } catch (err) { console.warn('[plat peer handler]', err) } }
     }
   })

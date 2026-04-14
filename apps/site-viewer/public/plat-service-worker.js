@@ -20,7 +20,7 @@
 const SHELL_CACHE = 'site-viewer-shell-v2'
 const SHELL_URL = '/'
 
-const APP_PATH_EXACT = new Set(['/', '/favicon.ico', '/plat-service-worker.js'])
+const APP_PATH_EXACT = new Set(['/', '/favicon.ico', '/sample-favicon.svg', '/plat-service-worker.js'])
 function isAppPath(pathname) {
   if (APP_PATH_EXACT.has(pathname)) return true
   if (pathname.startsWith('/src/')) return true
@@ -75,8 +75,10 @@ self.addEventListener('message', (event) => {
   if (!msg) return
   if (msg.type === 'PLAT_SKIP_WAITING') { self.skipWaiting(); return }
   if (msg.type === 'PLAT_PURGE_CONTENT_CACHE') {
+    const port = event.ports && event.ports[0]
     event.waitUntil(caches.delete(CONTENT_CACHE).then(() => {
       console.log('[site-viewer-sw] content cache purged')
+      try { port && port.postMessage({ ok: true }) } catch {}
     }))
     return
   }
