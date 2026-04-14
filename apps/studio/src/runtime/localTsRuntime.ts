@@ -1,6 +1,12 @@
 import {
   startClientSideServerFromSource,
 } from '@modularizer/plat-client/client-server'
+import { evaluateServerAuthorityStatus } from './authorityPolicy'
+import { registerAuthorityHostedServer } from './authorityHost'
+import { buildCssTargetUrl } from './clientTargetUrl'
+import { useIdentityStore } from '../store/identity'
+import { useNamespaceStore } from '../store/namespace'
+import { useWorkspaceStore } from '../store/workspace'
 import type {
   LocalRuntimeHandle,
 } from './types'
@@ -10,6 +16,28 @@ type StaticExports = {
   FileResponse: {
     from: (...args: unknown[]) => unknown
   }
+}
+
+/**
+ * If content is a `data:<mime>;base64,<payload>` URL, decode the payload to raw bytes.
+ * Non-base64 or non-data URLs are returned unchanged so the server emits them as text.
+ */
+function decodeIfDataUrl(content: string | Uint8Array): string | Uint8Array {
+  if (typeof content !== 'string') return content
+  if (!content.startsWith('data:')) return content
+  const match = /^data:([^;,]+)?(;base64)?,(.*)$/s.exec(content)
+  if (!match) return content
+  const mime = match[1] || ''
+  const isBase64 = !!match[2]
+  const payload = match[3] || ''
+  if (isBase64) {
+    const binary = atob(payload)
+    const bytes = new Uint8Array(binary.length)
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+    return bytes
+  }
+  // For non-base64, treat as text
+  return payload
 }
 
 function debugLocalTsRuntime(event: string, detail?: unknown): void {
@@ -40,11 +68,18 @@ export interface WorkspaceFileEntry {
 }
 
 /**
- * Workspace files are stored as `/<sampleId>/...` paths in studio.
- * Strip that leading segment so server static roots resolve like normal project files.
+ * Workspace files are stored as `/<sampleId>/...` paths in studio. The sampleId
+ * may itself be multi-segment (e.g. `torin/ts-static-site`), so strip the full
+ * project prefix — not just the first segment.
  */
-function toProjectRelativePath(workspacePath: string): string {
+function toProjectRelativePath(workspacePath: string, projectId?: string): string {
   const trimmed = workspacePath.replace(/^\/+/, '')
+  if (projectId) {
+    const normalizedProject = projectId.replace(/^\/+|\/+$/g, '')
+    if (normalizedProject && (trimmed === normalizedProject || trimmed.startsWith(`${normalizedProject}/`))) {
+      return trimmed.slice(normalizedProject.length).replace(/^\/+/, '')
+    }
+  }
   const slashIndex = trimmed.indexOf('/')
   if (slashIndex < 0) return trimmed
   return trimmed.slice(slashIndex + 1)
@@ -53,9 +88,24 @@ function toProjectRelativePath(workspacePath: string): string {
 export async function startLocalTsRuntime(options: {
   source: string | Record<string, string>
   serverName: string
+  projectId?: string
   workspaceFiles?: WorkspaceFileEntry[]
   onRequest?: (direction: 'request' | 'response', payload: unknown) => void
 }): Promise<LocalRuntimeHandle> {
+  if (useIdentityStore.getState().user && !options.serverName.trim().startsWith('dmz/')) {
+    await useNamespaceStore.getState().ensureAuthorityData()
+  }
+
+  const identityUser = useIdentityStore.getState().user
+  const authorityStatus = evaluateServerAuthorityStatus(
+    options.serverName,
+    identityUser,
+    useNamespaceStore.getState().namespaces,
+  )
+  if (!authorityStatus.allowed) {
+    throw new Error(authorityStatus.reason ?? 'Server name is not allowed.')
+  }
+
   debugLocalTsRuntime('start.begin', {
     serverName: options.serverName,
     sourceKind: typeof options.source,
@@ -66,26 +116,38 @@ export async function startLocalTsRuntime(options: {
   const staticAlias = createStaticAliasModuleUrl(staticExports)
   const rewrittenSource = rewriteStaticImports(options.source, staticAlias.url)
 
-  // Inject workspace static files as a global so user code can reference __workspaceFiles
-  if (options.workspaceFiles) {
-    const staticFiles: Record<string, string> = {}
-    const normalizedStaticKeys: string[] = []
-    for (const file of options.workspaceFiles) {
-      if (isStaticAsset(file.path)) {
-        const key = toProjectRelativePath(file.path)
-        staticFiles[key] = file.content
-        normalizedStaticKeys.push(key)
-      }
+  // Inject workspace static files as a global so user code can reference __workspaceFiles.
+  // We keep a single stable object and mutate it in place as workspace files change,
+  // so StaticFolder(__workspaceFiles) — which holds the reference — serves live contents
+  // without needing a server restart. Imported binary files are stored in the IDE as
+  // data URL strings (see store/workspace.ts readImportedFileContent); decode them back
+  // to raw bytes here so the static file server returns proper binary bodies.
+  const staticFiles: Record<string, string | Uint8Array> = {}
+  ;(globalThis as any).__workspaceFiles = staticFiles
+
+  const syncStaticFiles = (files: ReadonlyArray<{ path: string; content: string | Uint8Array }>) => {
+    const nextKeys = new Set<string>()
+    for (const file of files) {
+      if (!isStaticAsset(file.path)) continue
+      const key = toProjectRelativePath(file.path, options.projectId).replace(/^\/+|\/+$/g, '')
+      nextKeys.add(key)
+      staticFiles[key] = decodeIfDataUrl(file.content)
     }
-    ;(globalThis as any).__workspaceFiles = staticFiles
+    for (const key of Object.keys(staticFiles)) {
+      if (!nextKeys.has(key)) delete staticFiles[key]
+    }
+    return nextKeys
+  }
+
+  if (options.workspaceFiles) {
+    const keys = syncStaticFiles(options.workspaceFiles)
     debugLocalTsRuntime('workspace-files.injected', {
       serverName: options.serverName,
-      staticFileCount: normalizedStaticKeys.length,
-      staticFileKeysPreview: normalizedStaticKeys.slice(0, 30),
-      hasIndexHtml: normalizedStaticKeys.includes('index.html'),
+      staticFileCount: keys.size,
+      staticFileKeysPreview: Array.from(keys).slice(0, 30),
+      hasIndexHtml: keys.has('index.html'),
     })
   } else {
-    ;(globalThis as any).__workspaceFiles = {}
     debugLocalTsRuntime('workspace-files.injected', {
       serverName: options.serverName,
       staticFileCount: 0,
@@ -94,17 +156,50 @@ export async function startLocalTsRuntime(options: {
     })
   }
 
+  // Live updates: when the workspace file list changes, mirror it into the same
+  // staticFiles object so the running server picks up edits without a restart.
+  // After updating, broadcast a peer event so any connected viewers can refresh.
+  let lastFilesRef = useWorkspaceStore.getState().files
+  let signalerRef: { broadcast?: (m: unknown) => Promise<void> } | null = null
+  console.log('[LocalTsRuntime] hot-update: subscription ARMED for', options.serverName,
+    'initial files:', lastFilesRef.length)
+  const unsubscribeWorkspace = useWorkspaceStore.subscribe((state) => {
+    if (state.files === lastFilesRef) return
+    lastFilesRef = state.files
+    const keys = syncStaticFiles(state.files)
+    const indexHtml = staticFiles['index.html']
+    console.log('[LocalTsRuntime] hot-update FIRED:', options.serverName,
+      'keys=', Array.from(keys),
+      'index.html len=', typeof indexHtml === 'string' ? indexHtml.length : (indexHtml?.byteLength ?? '—'),
+      'index.html head=', typeof indexHtml === 'string' ? indexHtml.slice(0, 60) : '')
+    void signalerRef?.broadcast?.({
+      platcss: 'peer',
+      event: 'workspace-files-changed',
+      data: { serverName: options.serverName },
+    })
+  })
+
   const started = await startClientSideServerFromSource({
     source: rewrittenSource,
     serverName: options.serverName,
     sourceEntryPoint: typeof options.source === 'object' && 'index.ts' in options.source ? 'index.ts' : undefined,
     onRequest: options.onRequest,
   })
+  signalerRef = started.signaler as unknown as { broadcast?: (m: unknown) => Promise<void> }
 
   const connectionUrl = started.connectionUrl
   const resolvedServerName = connectionUrl?.startsWith('css://')
     ? connectionUrl.slice('css://'.length)
     : options.serverName
+  const hostToken = useIdentityStore.getState().user?.idToken ?? ''
+  const authorityHandle = !resolvedServerName.startsWith('dmz/') && hostToken
+    ? await registerAuthorityHostedServer({
+        serverName: resolvedServerName,
+        server: started.server as any,
+        token: hostToken,
+        authMode: 'public',
+      })
+    : null
 
   debugLocalTsRuntime('start.ready', {
     requestedServerName: options.serverName,
@@ -116,13 +211,15 @@ export async function startLocalTsRuntime(options: {
     language: 'typescript',
     launchable: true,
     serverName: resolvedServerName,
-    connectionUrl,
+    connectionUrl: buildCssTargetUrl(resolvedServerName),
     server: started.server,
     async stop() {
       debugLocalTsRuntime('stop.begin', {
         serverName: resolvedServerName,
-        connectionUrl,
+        connectionUrl: buildCssTargetUrl(resolvedServerName),
       })
+      unsubscribeWorkspace()
+      await authorityHandle?.stop()
       if (started && typeof (started as any).stop === 'function') {
         await (started as any).stop()
       }
@@ -237,12 +334,27 @@ function createCompatStaticExports(): StaticExports {
     }
 
     async getContent(): Promise<Uint8Array> {
+      let result: Uint8Array
       if (this.kind === 'path') {
         throw new Error('Path-backed FileResponse is not available in this runtime shim')
       }
-      return typeof this.source === 'string'
-        ? new TextEncoder().encode(this.source)
-        : this.source
+      if (typeof this.source === 'string') {
+        // Fallback: if this is a data URL, decode it
+        if (this.source.startsWith('data:')) {
+          const decoded = decodeIfDataUrl(this.source)
+          if (decoded instanceof Uint8Array) {
+            console.debug('[CompatFileResponse.getContent] returning decoded Uint8Array', { length: decoded.length, filename: this.filename, contentType: this.contentType })
+            return decoded
+          }
+        }
+        result = new TextEncoder().encode(this.source)
+        console.debug('[CompatFileResponse.getContent] returning TextEncoder Uint8Array', { length: result.length, filename: this.filename, contentType: this.contentType })
+        return result
+      }
+      // If already Uint8Array
+      result = this.source
+      console.debug('[CompatFileResponse.getContent] returning direct Uint8Array', { length: result.length, filename: this.filename, contentType: this.contentType })
+      return result
     }
   }
 
@@ -251,6 +363,7 @@ function createCompatStaticExports(): StaticExports {
     private readonly files: Record<string, string | Uint8Array>
 
     constructor(source: unknown) {
+      console.debug('[CompatStaticFolder] constructor called', { sourceType: typeof source, source });
       const out: Record<string, string | Uint8Array> = {}
       if (source && typeof source === 'object') {
         for (const [rawPath, rawContent] of Object.entries(source as Record<string, unknown>)) {
@@ -261,22 +374,30 @@ function createCompatStaticExports(): StaticExports {
         }
       }
       this.files = out
+      console.debug('[CompatStaticFolder] files keys', Object.keys(this.files));
     }
 
     async resolve(subPath: string): Promise<CompatFileResponse | null> {
-      const normalized = subPath.replace(/^\/+|\/+$/g, '')
+      const normalized = subPath.replace(/^\/+|\+$/g, '')
+      // Debug: log the incoming subPath and normalized key
+      console.debug('[CompatStaticFolder] resolve called:', { subPath, normalized, available: Object.keys(this.files) })
       if (!normalized) {
         const index = this.files['index.html']
+        console.debug('[CompatStaticFolder] resolve: index.html', { found: !!index })
         return index == null ? null : CompatFileResponse.from(index, 'index.html')
       }
 
       const exact = this.files[normalized]
+      console.debug('[CompatStaticFolder] resolve: exact lookup', { normalized, found: !!exact })
       if (exact != null) {
         return CompatFileResponse.from(exact, normalized.split('/').pop() ?? normalized)
       }
 
       const hasExt = /\.[^/]+$/.test(normalized)
-      if (hasExt) return null
+      if (hasExt) {
+        console.debug('[CompatStaticFolder] resolve: hasExt, not found', { normalized })
+        return null
+      }
 
       const stemMatches = Object.keys(this.files).filter((entry) => {
         const parent = entry.includes('/') ? entry.slice(0, entry.lastIndexOf('/')) : ''
@@ -287,6 +408,7 @@ function createCompatStaticExports(): StaticExports {
         return stem === (normalized.split('/').pop() ?? normalized)
       })
 
+      console.debug('[CompatStaticFolder] resolve: stemMatches', { normalized, stemMatches })
       if (stemMatches.length !== 1) return null
       const matched = stemMatches[0]
       const content = this.files[matched]
@@ -310,6 +432,14 @@ function guessMimeType(filename: string): string {
     case '.json': return 'application/json; charset=utf-8'
     case '.svg': return 'image/svg+xml'
     case '.txt': return 'text/plain; charset=utf-8'
+    case '.png': return 'image/png'
+    case '.jpg':
+    case '.jpeg': return 'image/jpeg'
+    case '.gif': return 'image/gif'
+    case '.webp': return 'image/webp'
+    case '.ico': return 'image/x-icon'
+    case '.bmp': return 'image/bmp'
+    case '.avif': return 'image/avif'
     default: return 'application/octet-stream'
   }
 }

@@ -11,6 +11,8 @@
   ],
   "scripts": {
     "dev": "npm run dev --workspace=@browserver/studio",
+    "dev:desktop": "npm run dev --workspace=@browserver/desktop",
+    "desktop": "npm run start --workspace=@browserver/desktop",
     "build": "npm run build --workspaces --if-present",
     "build:studio": "npm run build --workspace=@browserver/studio",
     "build:single": "npm run build:single --workspace=@browserver/studio",
@@ -22,7 +24,6 @@
   },
   "dependencies": {
     "@isomorphic-git/lightning-fs": "^4.6.2",
-    "@modularizer/plat-client": "^0.9.0",
     "isomorphic-git": "^1.25.7"
   },
   "devDependencies": {

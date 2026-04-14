@@ -1,5 +1,8 @@
 import { useMemo } from 'react'
+import { evaluateServerAuthorityStatus } from '../runtime/authorityPolicy'
 import { useRuntimeStore, type ServerEntry } from '../store/runtime'
+import { useIdentityStore } from '../store/identity'
+import { useNamespaceStore } from '../store/namespace'
 
 export function ServersSection() {
   const tabSessions = useRuntimeStore((state) => state.tabSessions)
@@ -11,6 +14,8 @@ export function ServersSection() {
   const switchTarget = useRuntimeStore((state) => state.switchTarget)
   const clientTargetUrl = useRuntimeStore((state) => state.clientTargetUrl)
   const connectionUrl = useRuntimeStore((state) => state.connectionUrl)
+  const user = useIdentityStore((state) => state.user)
+  const namespaces = useNamespaceStore((state) => state.namespaces)
 
   const activeUrl = clientTargetUrl || connectionUrl || ''
 
@@ -67,6 +72,7 @@ export function ServersSection() {
             <ServerCard
               key={entry.id}
               entry={entry}
+              authorityStatus={evaluateServerAuthorityStatus(entry.serverName, user, namespaces)}
               isActive={activeUrl === entry.connectionUrl || activeUrl === `css://${entry.serverName}`}
               onSwitch={() => void switchTarget(entry)}
             />
@@ -96,14 +102,24 @@ export function ServersSection() {
 
 function ServerCard({
   entry,
+  authorityStatus,
   isActive,
   onSwitch,
 }: {
   entry: ServerEntry
+  authorityStatus: ReturnType<typeof evaluateServerAuthorityStatus>
   isActive: boolean
   onSwitch: () => void
 }) {
   const url = entry.connectionUrl ?? `css://${entry.serverName}`
+  const authorityTone = authorityStatus.allowed
+    ? authorityStatus.mode === 'dmz' ? 'text-bs-text-faint' : 'text-bs-good'
+    : 'text-bs-error'
+  const authorityLabel = authorityStatus.allowed
+    ? authorityStatus.mode === 'dmz' ? 'dmz' : 'owned'
+    : authorityStatus.mode === 'blocked-anonymous' ? 'sign in'
+      : authorityStatus.mode === 'blocked-config' ? 'no authority'
+      : 'blocked'
 
   return (
     <div
@@ -123,6 +139,9 @@ function ServerCard({
           }`}
         />
         <span className="flex-1 truncate text-bs-text font-medium">{entry.serverName}</span>
+        <span className={`text-[9px] uppercase ${authorityTone}`} title={authorityStatus.reason ?? undefined}>
+          {authorityLabel}
+        </span>
         <span className="text-[9px] uppercase text-bs-text-faint">{entry.source}</span>
       </div>
       <div className="mt-0.5 truncate text-[10px] text-bs-text-muted">{url}</div>

@@ -10,9 +10,17 @@ const STATUS_COLORS: Record<string, string> = {
 
 function buildFaviconSvg(status: string): string {
   const dotColor = STATUS_COLORS[status] ?? STATUS_COLORS.idle
-  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
-  <text x="16" y="24" font-family="system-ui, sans-serif" font-size="22" font-weight="600" fill="#2563eb" text-anchor="middle">bs</text>
-  <circle cx="27" cy="5" r="5" fill="${dotColor}" />
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="120" height="120" viewBox="0 0 120 120">
+  <defs>
+    <linearGradient id="bs-bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#161822" />
+      <stop offset="100%" stop-color="#1f2335" />
+    </linearGradient>
+  </defs>
+  <rect x="4" y="4" width="112" height="112" rx="24" fill="url(#bs-bg)" stroke="#2a2e42" stroke-width="4" />
+  <text x="60" y="76" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="54" font-weight="700" fill="#7c8cf0" text-anchor="middle">bs</text>
+  <circle cx="93" cy="27" r="15" fill="#0f1117" />
+  <circle cx="93" cy="27" r="11" fill="${dotColor}" />
 </svg>`
 }
 

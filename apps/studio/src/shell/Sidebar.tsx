@@ -53,6 +53,7 @@ function summarizeTransactionDiff(entry: { pre: { workspace: { files: Array<{ pa
     const newContent = after.get(path) ?? ''
     if (oldContent === newContent) continue
     filesChanged += 1
+    if (typeof oldContent !== 'string' || typeof newContent !== 'string') continue
     const diff = countLineDiff(oldContent, newContent)
     addedLines += diff.added
     removedLines += diff.removed

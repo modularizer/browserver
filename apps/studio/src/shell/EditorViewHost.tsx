@@ -4,28 +4,33 @@ import SwaggerUI from 'swagger-ui-react'
 import 'swagger-ui-react/swagger-ui.css'
 import { RedocStandalone } from 'redoc'
 import {
-  createClientSideServerMQTTWebRTCPeerPool,
   createPlatFetch,
-  parseClientSideServerAddress,
 } from '@modularizer/plat-client/client-server'
 import type { DatabaseSnapshot } from '@browserver/database'
 import type { WorkspaceSnapshot } from '@browserver/storage'
 import type { ProjectBundle } from '../config/projectBundle'
+import { evaluateServerAuthorityStatus } from '../runtime/authorityPolicy'
 import { ClientTargetField } from './ClientTargetField'
 import { ServersSection } from './ServersSection'
 import { TsConsoleView, PythonConsoleView, CliEmulatorView } from './ApiConsoleViews'
 import { HistoryPanel } from './HistoryPanel'
+import { NamespaceDashboard } from './NamespaceDashboard'
+import { preferredServerNameForProject } from '../runtime/serverNames'
 import { TrustPanel } from './TrustPanel'
 import { useCheckpointStore } from '../store/checkpoints'
 import { useDatabaseStore } from '../store/database'
+import { useIdentityStore } from '../store/identity'
 import { useLayoutStore } from '../store/layout'
+import { useNamespaceStore } from '../store/namespace'
 import {
   useRuntimeStore,
   getRuntimeServerForConnectionUrl,
   getRuntimeServerForServerName,
 } from '../store/runtime'
 import { createInProcessChannel } from '../runtime/inProcessChannel'
-import { parseCssServerName } from '../runtime/clientTargetUrl'
+import { createBrowserverCssFetchConnection } from '../runtime/cssTransport'
+import { buildCssTargetUrl, parseCssServerName } from '../runtime/clientTargetUrl'
+import { buildSiteViewerUrl } from '../runtime/siteViewerUrl'
 import { usePlatBrowserFrame } from '../browser/usePlatBrowserFrame'
 import { useThemeStore } from '../theme'
 import {
@@ -47,6 +52,7 @@ export function EditorViewHost({ path }: EditorViewHostProps) {
   if (viewId === 'data') return <DataView />
   if (viewId === 'trust') return <TrustPanel />
   if (viewId === 'history') return <HistoryView />
+  if (viewId === 'namespace') return <NamespaceDashboard />
   if (viewId === 'logs') return <LogsView />
   if (viewId === 'calls') return <CallsView />
   if (viewId === 'build') return <BuildView />
@@ -66,6 +72,7 @@ function InspectView() {
   const dirtyFilePaths = useWorkspaceStore((state) => state.dirtyFilePaths)
   const saveState = useWorkspaceStore((state) => state.saveState)
   const activeFilePath = useWorkspaceStore((state) => state.activeFilePath)
+  const activeEditorPane = useWorkspaceStore((state) => state.activeEditorPane)
   const runtimeLanguage = useRuntimeStore((state) => state.language)
   const runtimeStatus = useRuntimeStore((state) => state.status)
   const launchable = useRuntimeStore((state) => state.launchable)
@@ -81,6 +88,13 @@ function InspectView() {
   const databaseSaveState = useDatabaseStore((state) => state.saveState)
   const activeRequest = requests.find((request) => request.id === activeRequestId) ?? null
   const activeFile = files.find((file) => file.path === activeFilePath) ?? null
+  const user = useIdentityStore((state) => state.user)
+  const namespaces = useNamespaceStore((state) => state.namespaces)
+  const launchAuthorityStatus = activeFile?.name.split('/').pop()?.startsWith('server')
+    ? evaluateServerAuthorityStatus(preferredServerNameForProject(sample.id, activeEditorPane), user, namespaces)
+    : null
+  const effectiveLaunchable = launchAuthorityStatus ? launchAuthorityStatus.allowed : launchable
+  const effectiveLaunchNote = launchAuthorityStatus?.reason ?? launchNote
   const activeTable = tables.find((table) => table.name === activeTableName) ?? tables[0] ?? null
 
   return (
@@ -89,10 +103,10 @@ function InspectView() {
         <InspectSection title="Runtime">
           <div className="text-bs-text">{runtimeLanguage ?? sample.serverLanguage}</div>
           <div className="text-bs-text">{runtimeStatus}</div>
-          <div className="text-bs-text-muted">{launchable ? 'launchable' : 'blocked'}</div>
+          <div className="text-bs-text-muted">{effectiveLaunchable ? 'launchable' : 'blocked'}</div>
           <div className="text-bs-text-muted">{connectionUrl ?? 'not running'}</div>
           <div className="text-bs-text-muted">{diagnostics.length} compile diagnostics</div>
-          {launchNote ? <div className="text-bs-text-muted">{launchNote}</div> : null}
+          {effectiveLaunchNote ? <div className="text-bs-text-muted">{effectiveLaunchNote}</div> : null}
         </InspectSection>
 
         <InspectSection title="Workspace">
@@ -953,7 +967,6 @@ function ProblemsView() {
 function BrowserView() {
   const tabSessions = useRuntimeStore((state) => state.tabSessions)
   const connectionUrl = useRuntimeStore((state) => state.connectionUrl)
-  const peerPoolRef = useRef<Awaited<ReturnType<typeof createClientSideServerMQTTWebRTCPeerPool>> | null>(null)
 
   const hasRunningServer = Object.values(tabSessions).some((session) => (
     session.mode === 'server' && session.status === 'running'
@@ -965,24 +978,16 @@ function BrowserView() {
 
     if (inProcessServer) {
       const channel = createInProcessChannel(inProcessServer)
-      return { fetch: createPlatFetch({ channel }) }
+      return {
+        fetch: createPlatFetch({ channel }),
+        connectionUrl: targetConnectionUrl,
+      }
     }
 
-    if (!peerPoolRef.current) {
-      peerPoolRef.current = createClientSideServerMQTTWebRTCPeerPool()
-    }
-
-    const session = await peerPoolRef.current.connect(parseClientSideServerAddress(targetConnectionUrl))
+    const connection = await createBrowserverCssFetchConnection(targetConnectionUrl)
     return {
-      fetch: createPlatFetch({ channel: session }),
-      close: async () => {
-        if (typeof session.close === 'function') {
-          await session.close()
-        }
-        if (peerPoolRef.current && typeof peerPoolRef.current.close === 'function') {
-          await peerPoolRef.current.close(targetConnectionUrl)
-        }
-      },
+      ...connection,
+      connectionUrl: buildCssTargetUrl(connection.matchedServerName),
     }
   }, [])
 
@@ -1007,14 +1012,8 @@ function BrowserView() {
       ?? parseCssServerName(connectionUrl ?? '')
     if (!serverName) return
 
-    const baseUrl = import.meta.env.BASE_URL || '/'
-    const basePrefix = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`
-    const serverPath = serverName
-      .split('/')
-      .filter(Boolean)
-      .map((segment) => encodeURIComponent(segment))
-      .join('/')
-    const href = new URL(`${basePrefix}${serverPath}`, window.location.origin).toString()
+    const href = buildSiteViewerUrl(serverName)
+    if (!href) return
     window.open(href, '_blank', 'noopener,noreferrer')
   }, [browserUrl, connectionUrl])
 

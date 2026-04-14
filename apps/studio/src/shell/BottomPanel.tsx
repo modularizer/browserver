@@ -1,6 +1,7 @@
 import { selectRuntimeIsStale, useRuntimeStore } from '../store/runtime'
 import { useDatabaseStore } from '../store/database'
 import { HistoryPanel } from './HistoryPanel'
+import { NamespaceDashboard } from './NamespaceDashboard'
 import { TrustPanel } from './TrustPanel'
 import { useWorkspaceStore, type BottomPanelId, type EditorViewId } from '../store/workspace'
 import { useLayoutStore } from '../store/layout'
@@ -11,6 +12,7 @@ const tabs: Array<{ id: BottomPanelId; label: string; body: string }> = [
   { id: 'client', label: 'Client', body: 'client playground output will appear here' },
   { id: 'data', label: 'Data', body: 'local database tables will appear here' },
   { id: 'trust', label: 'Trust', body: 'host identity and known hosts will appear here' },
+  { id: 'namespace', label: 'Account', body: 'namespace ownership and requests will appear here' },
   { id: 'history', label: 'History', body: 'project checkpoints will appear here' },
   { id: 'build', label: 'Build', body: 'build output will appear here' },
   { id: 'problems', label: 'Problems', body: 'no problems' },
@@ -30,6 +32,7 @@ const bottomTabToViewId: Record<BottomPanelId, EditorViewId> = {
   client: 'client',
   data: 'data',
   trust: 'trust',
+  namespace: 'namespace',
   history: 'history',
   build: 'build',
   problems: 'problems',
@@ -343,6 +346,8 @@ export function BottomPanel({ onCreateCheckpoint, collapsed = false, onRestore, 
         ) : null}
 
         {activeTab.id === 'trust' ? <TrustPanel /> : null}
+
+        {activeTab.id === 'namespace' ? <NamespaceDashboard /> : null}
 
         {activeTab.id === 'history' ? <HistoryPanel onCreateCheckpoint={onCreateCheckpoint} /> : null}
 

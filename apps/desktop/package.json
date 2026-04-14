@@ -1,0 +1,15 @@
+{
+  "name": "@browserver/desktop",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "main.mjs",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron .",
+    "build:studio": "npm run build --workspace=@browserver/studio"
+  },
+  "devDependencies": {
+    "electron": "^35.7.5"
+  }
+}

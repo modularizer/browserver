@@ -1,6 +1,10 @@
 import { useState } from 'react'
 import { useCheckpointStore } from '../store/checkpoints'
 import { useDatabaseStore } from '../store/database'
+import { evaluateServerAuthorityStatus } from '../runtime/authorityPolicy'
+import { preferredServerNameForProject } from '../runtime/serverNames'
+import { useIdentityStore } from '../store/identity'
+import { useNamespaceStore } from '../store/namespace'
 import { selectRuntimeIsStale, useRuntimeStore, type RuntimeRequestEntry } from '../store/runtime'
 import { useLayoutStore } from '../store/layout'
 import { useTrustStore } from '../store/trust'
@@ -35,6 +39,8 @@ export function RightPanel({ onStartTabDrag, onEndTabDrag }: RightPanelProps) {
   const dirtyFilePaths = useWorkspaceStore((state) => state.dirtyFilePaths)
   const saveState = useWorkspaceStore((state) => state.saveState)
   const activeFile = useWorkspaceStore(selectActiveFile)
+  const activeEditorPane = useWorkspaceStore((state) => state.activeEditorPane)
+  const sampleId = useWorkspaceStore((state) => state.sample.id)
   const setActivePanel = useWorkspaceStore((state) => state.setActivePanel)
   const activeRightPanelTab = useWorkspaceStore((state) => state.activeRightPanelTab)
   const setActiveRightPanelTab = useWorkspaceStore((state) => state.setActiveRightPanelTab)
@@ -59,6 +65,8 @@ export function RightPanel({ onStartTabDrag, onEndTabDrag }: RightPanelProps) {
   const clientTargetUrl = useRuntimeStore((state) => state.clientTargetUrl)
   const setClientTargetUrl = useRuntimeStore((state) => state.setClientTargetUrl)
   const errorMessage = useRuntimeStore((state) => state.errorMessage)
+  const user = useIdentityStore((state) => state.user)
+  const namespaces = useNamespaceStore((state) => state.namespaces)
   const tables = useDatabaseStore((state) => state.tables)
   const activeTableName = useDatabaseStore((state) => state.activeTableName)
   const databaseSaveState = useDatabaseStore((state) => state.saveState)
@@ -72,6 +80,11 @@ export function RightPanel({ onStartTabDrag, onEndTabDrag }: RightPanelProps) {
   const activeRequest = requests.find((request) => request.id === activeRequestId) ?? null
   const activeTable = tables.find((table) => table.name === activeTableName) ?? tables[0] ?? null
   const hostRecord = knownHosts.find((record) => record.serverName === trustServerName) ?? null
+  const launchAuthorityStatus = activeFile?.name.split('/').pop()?.startsWith('server')
+    ? evaluateServerAuthorityStatus(preferredServerNameForProject(sampleId, activeEditorPane), user, namespaces)
+    : null
+  const effectiveLaunchable = launchAuthorityStatus ? launchAuthorityStatus.allowed : launchable
+  const effectiveLaunchNote = launchAuthorityStatus?.reason ?? launchNote
 
   return (
     <div
@@ -135,11 +148,11 @@ export function RightPanel({ onStartTabDrag, onEndTabDrag }: RightPanelProps) {
             <Section title="Runtime">
               <div className="text-bs-text">{runtimeLanguage ?? sample.serverLanguage}</div>
               <div className="text-bs-text">{runtimeStatus}</div>
-              <div className="text-bs-text-muted">{launchable ? 'launchable' : 'blocked'}</div>
+              <div className="text-bs-text-muted">{effectiveLaunchable ? 'launchable' : 'blocked'}</div>
               <div className="text-bs-text-muted">{runtimeIsStale ? 'restart required' : 'runtime matches current source'}</div>
               <div className="text-bs-text-muted">{connectionUrl ?? 'not running'}</div>
               <div className="text-bs-text-muted">{diagnostics.length} compile diagnostics</div>
-              {launchNote ? <div className="text-bs-text-muted">{launchNote}</div> : null}
+              {effectiveLaunchNote ? <div className="text-bs-text-muted">{effectiveLaunchNote}</div> : null}
               {errorMessage ? <div className="text-bs-error">{errorMessage}</div> : null}
             </Section>
 

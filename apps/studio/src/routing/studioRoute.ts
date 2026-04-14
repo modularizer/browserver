@@ -2,6 +2,7 @@ export interface ParsedStudioRoute {
   mode: 'ide' | 'preview'
   projectName: string | null
   serverName: string | null
+  previewPath?: string
   previewMode?: 'browser' | 'api'
   apiViewMode?: 'client' | 'ts-console' | 'py-console' | 'cli' | 'swagger' | 'redoc' | 'json' | 'yaml'
   targetUrl?: string
@@ -52,6 +53,24 @@ function decodePathSegments(segments: string[]): string {
 function splitPath(pathname: string): string[] {
   return trimSurroundingSlashes(pathname).split('/').filter(Boolean)
 }
+
+function splitBrowserPreviewSegments(previewSegments: string[]): { serverName: string | null; previewPath: string } {
+  if (previewSegments.length === 0) {
+    return { serverName: null, previewPath: '/' }
+  }
+
+  // Browserver server names are currently two-part slugs in practice:
+  // `namespace/project` (or `dmz/project`, plus optional pane suffixes on the
+  // project segment). Treat any remaining segments as the requested in-site path.
+  const serverSegments = previewSegments.length >= 2
+    ? previewSegments.slice(0, 2)
+    : previewSegments
+  const pathSegments = previewSegments.slice(serverSegments.length)
+  const serverName = decodePathSegments(serverSegments) || null
+  const previewPath = pathSegments.length > 0 ? `/${decodePathSegments(pathSegments)}` : '/'
+  return { serverName, previewPath }
+}
+
 function stripBasePath(pathname: string, basePath: string): string {
   if (basePath === '/') return pathname
   const baseNoTrailingSlash = basePath.replace(/\/+$/, '')
@@ -77,16 +96,19 @@ export function parseStudioRoute(pathname: string, basePath?: string): ParsedStu
         mode: 'preview',
         projectName: null,
         serverName: remoteTarget,
+        previewPath: '/',
         previewMode: 'api',
         apiViewMode: apiViewMode ?? 'client',
         targetUrl: remoteTarget ? `${protocol}://${remoteTarget}` : undefined,
         basePath: normalizedBasePath,
       }
     }
+    const browserPreview = splitBrowserPreviewSegments(serverSegments)
     return {
       mode: 'preview',
       projectName: null,
-      serverName: decodePathSegments(serverSegments) || null,
+      serverName: browserPreview.serverName,
+      previewPath: browserPreview.previewPath,
       previewMode: apiViewMode ? 'api' : 'browser',
       apiViewMode: apiViewMode ?? undefined,
       targetUrl: undefined,
@@ -99,6 +121,7 @@ export function parseStudioRoute(pathname: string, basePath?: string): ParsedStu
       mode: 'ide',
       projectName,
       serverName: null,
+      previewPath: undefined,
       previewMode: undefined,
       apiViewMode: undefined,
       targetUrl: undefined,
@@ -115,6 +138,7 @@ export function parseStudioRoute(pathname: string, basePath?: string): ParsedStu
     mode: 'ide',
     projectName: null,
     serverName: null,
+    previewPath: undefined,
     previewMode: undefined,
     apiViewMode: undefined,
     targetUrl: undefined,

@@ -1,5 +1,5 @@
 import ts from 'typescript'
-import { connectClientSideServer } from '@modularizer/plat-client/client-server'
+import { connectBrowserverClientSideServer } from './cssTransport'
 
 export interface ClientRunResult {
   result: unknown
@@ -22,7 +22,7 @@ export async function runClientSource(options: {
   const logs: string[] = []
   
   // Always get openapi by connecting to the target server (like real clients do)
-  const { openapi: fetchedOpenapi } = await connectClientSideServer({ baseUrl: options.targetUrl })
+  const { openapi: fetchedOpenapi } = await connectBrowserverClientSideServer(options.targetUrl)
   const openapi = fetchedOpenapi as unknown as Record<string, unknown>
   
   const LocalOpenAPIClient = createOpenApiClient(options.targetUrl)
@@ -95,7 +95,7 @@ ${bodyLines.join('\n')}
 function createOpenApiClient(targetUrl: string) {
   // Use real client connection for genuine communication
   return async () => {
-    const { client } = await connectClientSideServer({ baseUrl: targetUrl })
+    const { client } = await connectBrowserverClientSideServer(targetUrl)
     return client
   }
 }

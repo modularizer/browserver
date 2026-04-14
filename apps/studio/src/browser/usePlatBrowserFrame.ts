@@ -1,8 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { generateBridgeScript } from '@modularizer/plat-client/client-server'
+import { buildCssTargetUrl, parseCssServerName } from '../runtime/clientTargetUrl'
+import { parseSiteViewerUrl } from '../runtime/siteViewerUrl'
 
 export interface BrowserConnection {
   fetch: typeof fetch
+  initialPath?: string
+  connectionUrl?: string
   close?: () => void | Promise<void>
 }
 
@@ -12,34 +16,46 @@ export interface UsePlatBrowserFrameOptions {
 }
 
 function parseBrowserTarget(rawInput: string): {
+  directUrl: string | null
   connectionUrl: string | null
-  requestPath: string | null
-  normalizedUrl: string | null
+  requestPath: string
+  requestSearch: string
 } {
   const trimmed = rawInput.trim()
+  const siteViewerTarget = parseSiteViewerUrl(trimmed)
+  if (siteViewerTarget) {
+    const connectionTarget = buildCssTargetUrl(siteViewerTarget.serverName)
+    return {
+      directUrl: trimmed,
+      connectionUrl: connectionTarget,
+      requestPath: siteViewerTarget.previewPath,
+      requestSearch: siteViewerTarget.search,
+    }
+  }
+
   const withScheme = trimmed.startsWith('css://') ? trimmed : `css://${trimmed.replace(/^\/+/, '')}`
   if (!withScheme.startsWith('css://')) {
-    return { connectionUrl: null, requestPath: null, normalizedUrl: null }
+    return { directUrl: null, connectionUrl: null, requestPath: '/', requestSearch: '' }
   }
 
+  // A multi-segment server name is serialized as `css:///ns/name` (triple slash)
+  // so `parseCssServerName` can recover the full server identity. In that form,
+  // anything beyond the server name is the request path.
+  const server = parseCssServerName(withScheme)
+  if (!server) {
+    return { directUrl: null, connectionUrl: null, requestPath: '/', requestSearch: '' }
+  }
+
+  let requestSearch = ''
   try {
-    const parsed = new URL(withScheme)
-    const server = parsed.host || parsed.pathname.replace(/^\/+/, '')
-    if (!server) {
-      return { connectionUrl: null, requestPath: null, normalizedUrl: null }
-    }
-
-    const connectionTarget = `css://${server}`
-    const pathPart = parsed.pathname || '/'
-    const requestPath = `${pathPart}${parsed.search}`
-    const hasExplicitPath = parsed.pathname === '/' || parsed.pathname.length > 1
-    const normalizedUrl = hasExplicitPath || parsed.search
-      ? `${connectionTarget}${parsed.pathname || ''}${parsed.search}`
-      : connectionTarget
-    return { connectionUrl: connectionTarget, requestPath, normalizedUrl }
+    requestSearch = new URL(withScheme).search
   } catch {
-    return { connectionUrl: null, requestPath: null, normalizedUrl: null }
+    const queryIndex = withScheme.indexOf('?')
+    requestSearch = queryIndex >= 0 ? withScheme.slice(queryIndex) : ''
   }
+
+  const connectionTarget = buildCssTargetUrl(server)
+  return { directUrl: null, connectionUrl: connectionTarget, requestPath: '/', requestSearch }
 }
 
 function injectBridgeScript(html: string): string {
@@ -92,13 +108,22 @@ export function usePlatBrowserFrame(options: UsePlatBrowserFrameOptions) {
 
   const navigate = useCallback(async (inputUrl: string) => {
     const target = parseBrowserTarget(inputUrl)
-    if (!target.connectionUrl || !target.requestPath) {
-      setError('Enter a full css://server-name/path address in the URL bar.')
+    if (target.directUrl) {
+      setLoading(true)
+      setError(null)
+      clearActiveBlobUrl()
+      await closeConnection()
+      if (iframeRef.current) {
+        iframeRef.current.srcdoc = ''
+        iframeRef.current.src = target.directUrl
+      }
+      setLoading(false)
       return
     }
 
-    if (target.normalizedUrl) {
-      setBrowserUrl(target.normalizedUrl)
+    if (!target.connectionUrl) {
+      setError('Enter a css:// address or a site-viewer URL.')
+      return
     }
 
     setLoading(true)
@@ -106,7 +131,15 @@ export function usePlatBrowserFrame(options: UsePlatBrowserFrameOptions) {
 
     try {
       const connection = await ensureConnection(target.connectionUrl)
-      const response = await connection.fetch(target.requestPath)
+      const resolvedBasePath = connection.initialPath || '/'
+      const requestPath = target.requestPath === '/' ? '' : target.requestPath
+      const responseBasePath = resolvedBasePath === '/'
+        ? (requestPath || '/')
+        : `${resolvedBasePath.replace(/\/+$/, '')}${requestPath}`
+      const responsePath = target.requestSearch
+        ? `${responseBasePath}${target.requestSearch}`
+        : responseBasePath
+      const response = await connection.fetch(responsePath)
 
       if (!response.ok) {
         setError(`${response.status} ${response.statusText}`)
@@ -228,7 +261,3 @@ export function usePlatBrowserFrame(options: UsePlatBrowserFrameOptions) {
     closeConnection,
   }
 }
-
-
-
-

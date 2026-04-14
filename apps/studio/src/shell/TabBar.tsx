@@ -1,5 +1,9 @@
 import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
 import { MenuButton } from './MenuButton'
+import { evaluateServerAuthorityStatus } from '../runtime/authorityPolicy'
+import { preferredServerNameForProject } from '../runtime/serverNames'
+import { useIdentityStore } from '../store/identity'
+import { useNamespaceStore } from '../store/namespace'
 import { selectTabRuntimeSession, useRuntimeStore } from '../store/runtime'
 import {
   editorViewDefinitions,
@@ -44,6 +48,7 @@ export function TabBar({
   const setActiveFile = useWorkspaceStore((state) => state.setActiveFile)
   const openEditorView = useWorkspaceStore((state) => state.openEditorView)
   const createFile = useWorkspaceStore((state) => state.createFile)
+  const sampleId = useWorkspaceStore((state) => state.sample.id)
   const activeEditorPane = useWorkspaceStore((state) => state.activeEditorPane)
   const paneTabs = useWorkspaceStore((state) => state.paneTabs)
   const orderedPaths = useWorkspaceStore((state) => selectPaneTabs(state, 'primary'))
@@ -52,18 +57,26 @@ export function TabBar({
   const assignFileToPane = useWorkspaceStore((state) => state.assignFileToPane)
   const splitFileToPane = useWorkspaceStore((state) => state.splitFileToPane)
   const focusEditorPane = useWorkspaceStore((state) => state.focusEditorPane)
-  const primaryRuntime = useRuntimeStore(selectTabRuntimeSession(paneFiles.primary))
+  const activePanePath = paneFiles[activeEditorPane]
+  const activePaneRuntime = useRuntimeStore(selectTabRuntimeSession(activePanePath))
   const tabSessions = useRuntimeStore((state) => state.tabSessions)
   const runPane = useRuntimeStore((state) => state.runPane)
   const stopPane = useRuntimeStore((state) => state.stopPane)
+  const user = useIdentityStore((state) => state.user)
+  const namespaces = useNamespaceStore((state) => state.namespaces)
   const itemLabels = useMemo(() => getEditorItemLabels(orderedPaths, files, viewTitles), [files, orderedPaths, viewTitles])
   const openItems = orderedPaths.map((path) => ({
     path,
     label: itemLabels[path] ?? path,
     isView: Boolean(getEditorViewId(path)),
   }))
-  const isRunning = primaryRuntime.mode === 'server' && (primaryRuntime.status === 'running' || primaryRuntime.status === 'starting')
-  const activeIsView = Boolean(getEditorViewId(paneFiles.primary))
+  const isRunning = activePaneRuntime.mode === 'server' && (activePaneRuntime.status === 'running' || activePaneRuntime.status === 'starting')
+  const activeIsView = Boolean(getEditorViewId(activePanePath))
+  const activeFile = files.find((file) => file.path === activePanePath) ?? null
+  const launchAuthorityStatus = activeFile?.name.split('/').pop()?.startsWith('server')
+    ? evaluateServerAuthorityStatus(preferredServerNameForProject(sampleId, activeEditorPane), user, namespaces)
+    : null
+  const canRunActive = isRunning || !launchAuthorityStatus || launchAuthorityStatus.allowed
   const unopenedFiles = files
     .filter((file) => !openFilePaths.includes(file.path))
     .map((file) => ({
@@ -370,15 +383,16 @@ export function TabBar({
         {!activeIsView ? (
           <>
             <span className="text-[9px] uppercase leading-none tracking-wide text-bs-text-faint">
-              {primaryRuntime.status}
+              {activePaneRuntime.status}
             </span>
             <button
-              onClick={() => void (isRunning ? stopPane('primary') : runPane('primary'))}
+              onClick={() => void (isRunning ? stopPane(activeEditorPane) : runPane(activeEditorPane))}
+              disabled={!canRunActive}
               className={`flex h-5 w-5 shrink-0 items-center justify-center rounded text-[11px] leading-none ${
                 isRunning ? 'bg-bs-error text-bs-accent-text' : 'bg-bs-good text-bs-accent-text'
-              }`}
+              } disabled:cursor-not-allowed disabled:opacity-50`}
               aria-label={isRunning ? 'Stop current pane' : 'Run current pane'}
-              title={isRunning ? 'Stop the current pane runtime' : 'Run the current pane file'}
+              title={isRunning ? 'Stop the current pane runtime' : launchAuthorityStatus?.reason ?? 'Run the current pane file'}
             >
               {isRunning ? '■' : '▶'}
             </button>

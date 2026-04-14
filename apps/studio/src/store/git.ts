@@ -107,7 +107,7 @@ export async function ensureRepo(workspaceId: string): Promise<GitRepo> {
   return repo
 }
 
-export async function writeWorkspaceTree(workspaceId: string, files: Array<{ path: string; content: string }>): Promise<void> {
+export async function writeWorkspaceTree(workspaceId: string, files: Array<{ path: string; content: string | Uint8Array }>): Promise<void> {
   const repo = await ensureRepo(workspaceId)
   await repo.ready
   // @ts-ignore
@@ -138,7 +138,7 @@ export async function writeWorkspaceTree(workspaceId: string, files: Array<{ pat
   }
 }
 
-export async function commitWorkspace(workspaceId: string, files: Array<{ path: string; content: string }>, message: string): Promise<string> {
+export async function commitWorkspace(workspaceId: string, files: Array<{ path: string; content: string | Uint8Array }>, message: string): Promise<string> {
   const repo = await ensureRepo(workspaceId)
   await writeWorkspaceTree(workspaceId, files)
   const git = await loadGit()

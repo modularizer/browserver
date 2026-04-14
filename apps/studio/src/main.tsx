@@ -5,7 +5,12 @@ import { SiteViewer } from './SiteViewer'
 import { samples } from './samples'
 import { ACTIVE_WORKSPACE_KEY } from './store/workspace'
 import { parseStudioRoute } from './routing/studioRoute'
+import { installCssServiceWorker } from './runtime/cssServiceWorker'
 import './index.css'
+
+void installCssServiceWorker().catch((err) => {
+  console.error('[browserver] Failed to install css service worker', err)
+})
 function buildIdeRoutePath(projectId: string, basePath?: string): string {
   const normalizedBasePath = (() => {
     const candidate = (basePath ?? '/').trim() || '/'
@@ -54,6 +59,7 @@ function Root() {
     return (
       <SiteViewer
         serverName={route.serverName}
+        previewPath={route.previewPath}
         initialApiMode={route.apiViewMode}
         previewMode={route.previewMode}
         targetUrl={route.targetUrl}

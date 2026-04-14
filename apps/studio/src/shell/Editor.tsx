@@ -6,6 +6,9 @@ import CssWorker from 'monaco-editor/esm/vs/language/css/css.worker?worker&inlin
 import HtmlWorker from 'monaco-editor/esm/vs/language/html/html.worker?worker&inline'
 import JsonWorker from 'monaco-editor/esm/vs/language/json/json.worker?worker&inline'
 import TsWorker from 'monaco-editor/esm/vs/language/typescript/ts.worker?worker&inline'
+import { evaluateServerAuthorityStatus } from '../runtime/authorityPolicy'
+import { buildSiteViewerUrl } from '../runtime/siteViewerUrl'
+import { preferredServerNameForProject } from '../runtime/serverNames'
 import { setupMonacoTypeEnvironment } from '../editor/setupMonaco'
 import { EditorViewHost } from './EditorViewHost'
 import { MarkdownPreview, MarkdownToolbar, type MdMode } from './MarkdownPane'
@@ -14,7 +17,9 @@ import { NotebookPreview, NotebookToolbar, type NotebookMode } from './NotebookP
 import { SvgPreview, SvgToolbar, type SvgMode } from './SvgPane'
 import { MenuButton } from './MenuButton'
 import { Resizer } from './Resizer'
+import { useIdentityStore } from '../store/identity'
 import { useLayoutStore } from '../store/layout'
+import { useNamespaceStore } from '../store/namespace'
 import { selectTabRuntimeSession, useRuntimeStore } from '../store/runtime'
 import {
   editorViewDefinitions,
@@ -94,14 +99,14 @@ function isRasterImageFile(file: WorkspaceFile | null): boolean {
     || lower.endsWith('.avif')
   ) return true
 
-  return file.content.startsWith('data:image/')
+  return typeof file.content === 'string' && file.content.startsWith('data:image/')
 }
 
 function isPdfFile(file: WorkspaceFile | null): boolean {
   if (!file) return false
   if (file.language === 'pdf') return true
   if (file.name.toLowerCase().endsWith('.pdf')) return true
-  return file.content.startsWith('data:application/pdf')
+  return typeof file.content === 'string' && file.content.startsWith('data:application/pdf')
 }
 
 function isVideoFile(file: WorkspaceFile | null): boolean {
@@ -115,7 +120,7 @@ function isVideoFile(file: WorkspaceFile | null): boolean {
     || lower.endsWith('.m4v')
     || lower.endsWith('.ogv')
   ) return true
-  return file.content.startsWith('data:video/')
+  return typeof file.content === 'string' && file.content.startsWith('data:video/')
 }
 
 function isCsvFile(file: WorkspaceFile | null): boolean {
@@ -302,26 +307,33 @@ export function Editor({
     }
   }, [])
 
+  // Prevent feedback loop between Monaco and workspace store
+  const isSyncingModelRef = useRef(false)
   useEffect(() => {
     if (!hydrated) return
 
     const nextPaths = new Set(files.map((file) => file.path))
     for (const [path, model] of modelsRef.current.entries()) {
-        if (!nextPaths.has(path)) {
-          if (primaryPaneRef.current.editor?.getModel() === model) primaryPaneRef.current.editor.setModel(null)
-          if (secondaryPaneRef.current.editor?.getModel() === model) secondaryPaneRef.current.editor.setModel(null)
-          if (tertiaryPaneRef.current.editor?.getModel() === model) tertiaryPaneRef.current.editor.setModel(null)
-          model.dispose()
-          modelsRef.current.delete(path)
-          viewStatesRef.current.delete(`primary:${path}`)
-          viewStatesRef.current.delete(`secondary:${path}`)
-          viewStatesRef.current.delete(`tertiary:${path}`)
-        }
+      if (!nextPaths.has(path)) {
+        if (primaryPaneRef.current.editor?.getModel() === model) primaryPaneRef.current.editor.setModel(null)
+        if (secondaryPaneRef.current.editor?.getModel() === model) secondaryPaneRef.current.editor.setModel(null)
+        if (tertiaryPaneRef.current.editor?.getModel() === model) tertiaryPaneRef.current.editor.setModel(null)
+        model.dispose()
+        modelsRef.current.delete(path)
+        viewStatesRef.current.delete(`primary:${path}`)
+        viewStatesRef.current.delete(`secondary:${path}`)
+        viewStatesRef.current.delete(`tertiary:${path}`)
       }
+    }
 
     for (const file of files) {
-      if (isRasterImageFile(file) || isVideoFile(file) || isPdfFile(file) || isXlsxFile(file) || isArchiveFile(file)) {
-        const existing = modelsRef.current.get(file.path)
+      // Only sync Monaco for text-like files
+      const isText = typeof file.content === 'string' && !isRasterImageFile(file) && !isVideoFile(file) && !isPdfFile(file) && !isXlsxFile(file) && !isArchiveFile(file)
+      const uri = monaco.Uri.from({ scheme: 'file', path: file.path })
+      const monacoLang = file.name.toLowerCase().endsWith('.svg') ? 'xml' : file.language
+      const contentStr = typeof file.content === 'string' ? file.content : ''
+      const existing = modelsRef.current.get(file.path)
+      if (!isText) {
         if (existing) {
           if (primaryPaneRef.current.editor?.getModel() === existing) primaryPaneRef.current.editor.setModel(null)
           if (secondaryPaneRef.current.editor?.getModel() === existing) secondaryPaneRef.current.editor.setModel(null)
@@ -331,16 +343,15 @@ export function Editor({
         }
         continue
       }
-      const uri = monaco.Uri.from({ scheme: 'file', path: file.path })
-      const monacoLang = file.name.toLowerCase().endsWith('.svg') ? 'xml' : file.language
-      const existing = modelsRef.current.get(file.path)
       if (!existing) {
-        modelsRef.current.set(file.path, monaco.editor.createModel(file.content, monacoLang, uri))
+        modelsRef.current.set(file.path, monaco.editor.createModel(contentStr, monacoLang, uri))
         continue
       }
       monaco.editor.setModelLanguage(existing, monacoLang)
-      if (existing.getValue() !== file.content) {
-        existing.setValue(file.content)
+      if (existing.getValue() !== contentStr) {
+        isSyncingModelRef.current = true
+        existing.setValue(contentStr)
+        isSyncingModelRef.current = false
       }
     }
   }, [files, hydrated])
@@ -551,20 +562,22 @@ export function Editor({
     if (!nextModel) return
 
     const currentModel = editor.getModel()
-    if (currentModel?.uri.path && currentModel !== nextModel) {
-      viewStatesRef.current.set(`${paneId}:${currentModel.uri.path}`, editor.saveViewState())
-    }
+    const modelChanged = currentModel !== nextModel
 
-    if (currentModel !== nextModel) {
+    // Only swap the model (and restore view state) when the editor is actually
+    // switching to a different file. Without this guard, each keystroke updates
+    // the workspace store, which changes `file` identity, re-runs this effect,
+    // and re-applies a stale saved view state — yanking the cursor around.
+    if (modelChanged) {
+      if (currentModel?.uri.path) {
+        viewStatesRef.current.set(`${paneId}:${currentModel.uri.path}`, editor.saveViewState())
+      }
       editor.setModel(nextModel)
+      const viewState = viewStatesRef.current.get(`${paneId}:${file.path}`)
+      if (viewState) editor.restoreViewState(viewState)
     }
 
-    const viewState = viewStatesRef.current.get(`${paneId}:${file.path}`)
-    if (viewState) {
-      editor.restoreViewState(viewState)
-    }
-
-    if (focus) {
+    if (focus && modelChanged) {
       editor.focus()
     }
   }
@@ -642,6 +655,7 @@ export function Editor({
       }),
     ]
     pane.editor.onDidChangeModelContent(() => {
+      if (isSyncingModelRef.current) return
       const model = pane.editor?.getModel()
       if (!model) return
 
@@ -705,14 +719,8 @@ function PaneContent({
   const openRunningServerInNewTab = useCallback(() => {
     const serverName = runtimeSession.serverName?.trim()
     if (!serverName) return
-    const baseUrl = import.meta.env.BASE_URL || '/'
-    const basePrefix = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`
-    const serverPath = serverName
-      .split('/')
-      .filter(Boolean)
-      .map((segment) => encodeURIComponent(segment))
-      .join('/')
-    const href = new URL(`${basePrefix}${serverPath}`, window.location.origin).toString()
+    const href = buildSiteViewerUrl(serverName)
+    if (!href) return
     window.open(href, '_blank', 'noopener,noreferrer')
   }, [runtimeSession.serverName])
 
@@ -742,15 +750,15 @@ function PaneContent({
             ↗
           </button>
         ) : null}
-        <div
-          ref={containerRef}
-          className={`h-full ${
-            view || isImage || isVideo || isPdf || isCsv || isXlsx || isArchive ? 'hidden'
-              : mode === 'preview' ? 'hidden'
-              : mode === 'split' ? 'w-1/2'
-              : 'w-full'
-          }`}
-        />
+          <div
+            ref={containerRef}
+                className={`h-full ${
+                  (!!view || isImage || isVideo || isPdf || isCsv || isXlsx || isArchive) ? 'hidden'
+                    : mode === 'preview' ? 'hidden'
+                    : mode === 'split' ? 'w-1/2'
+                    : 'w-full'
+                }`}
+          />
         {isImage && file ? (
           <ImagePreview content={file.content} name={file.name} />
         ) : null}
@@ -766,30 +774,30 @@ function PaneContent({
         {isArchive && file ? (
           <ArchivePreview file={file} />
         ) : null}
-        {isMarkdown && !view && mode !== 'code' ? (
-          <>
-            {mode === 'split' ? <div className="w-px flex-none bg-bs-border" /> : null}
-            <div className={`min-w-0 ${mode === 'split' ? 'w-1/2' : 'w-full'}`}>
-              <MarkdownPreview content={file.content} editor={paneRef.current.editor} />
-            </div>
-          </>
-        ) : null}
-        {isSvg && !view && mode !== 'code' && file ? (
-          <>
-            {mode === 'split' ? <div className="w-px flex-none bg-bs-border" /> : null}
-            <div className={`min-w-0 ${mode === 'split' ? 'w-1/2' : 'w-full'}`}>
-              <SvgPreview content={file.content} />
-            </div>
-          </>
-        ) : null}
-        {isHtml && !view && mode !== 'code' && file ? (
-          <>
-            {mode === 'split' ? <div className="w-px flex-none bg-bs-border" /> : null}
-            <div className={`min-w-0 ${mode === 'split' ? 'w-1/2' : 'w-full'}`}>
-              <HtmlPreview content={file.content} />
-            </div>
-          </>
-        ) : null}
+         {isMarkdown && !view && mode !== 'code' && file ? (
+           <>
+             {mode === 'split' ? <div className="w-px flex-none bg-bs-border" /> : null}
+             <div className={`min-w-0 ${mode === 'split' ? 'w-1/2' : 'w-full'}` as string}>
+               <MarkdownPreview content={typeof file.content === 'string' ? file.content : ''} editor={paneRef.current.editor} />
+             </div>
+           </>
+         ) : null}
+         {isSvg && !view && mode !== 'code' && file ? (
+           <>
+             {mode === 'split' ? <div className="w-px flex-none bg-bs-border" /> : null}
+             <div className={`min-w-0 ${mode === 'split' ? 'w-1/2' : 'w-full'}` as string}>
+               <SvgPreview content={typeof file.content === 'string' ? file.content : ''} />
+             </div>
+           </>
+         ) : null}
+         {isHtml && !view && mode !== 'code' && file ? (
+           <>
+             {mode === 'split' ? <div className="w-px flex-none bg-bs-border" /> : null}
+             <div className={`min-w-0 ${mode === 'split' ? 'w-1/2' : 'w-full'}` as string}>
+               <HtmlPreview content={typeof file.content === 'string' ? file.content : ''} filePath={file.path} />
+             </div>
+           </>
+         ) : null}
         {isNotebook && !view && mode !== 'code' && file ? (
           <>
             {mode === 'split' ? <div className="w-px flex-none bg-bs-border" /> : null}
@@ -808,7 +816,8 @@ function PaneContent({
   )
 }
 
-function PdfPreview({ content, name }: { content: string; name: string }) {
+function PdfPreview({ content: rawContent, name }: { content: string | Uint8Array; name: string }) {
+  const content = useBinarySrc(rawContent, name)
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-bs-bg-panel">
       <div className="flex h-[28px] flex-none items-center border-b border-bs-border bg-bs-bg-panel px-2 text-[10px]">
@@ -827,17 +836,18 @@ function PdfPreview({ content, name }: { content: string; name: string }) {
   )
 }
 
-function VideoPreview({ content, name }: { content: string; name: string }) {
+function VideoPreview({ content: rawContent, name }: { content: string | Uint8Array; name: string }) {
+  const content = useBinarySrc(rawContent, name)
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-bs-bg-panel">
       <div className="flex h-[28px] flex-none items-center border-b border-bs-border bg-bs-bg-panel px-2 text-[10px]">
-        <span className="truncate text-bs-text-faint">{name}</span>
+        <span className="truncate text-bs-text-faint">{typeof name === 'string' ? name : ''}</span>
         <div className="flex-1" />
         <span className="text-bs-text-faint">Video</span>
       </div>
       <div className="flex min-h-0 flex-1 items-center justify-center bg-black p-4">
         <video
-          src={content}
+          src={typeof content === 'string' ? content : ''}
           controls
           className="max-h-full max-w-full"
           preload="metadata"
@@ -996,7 +1006,31 @@ function decodeBase64Payload(source: string): Uint8Array {
   return bytes
 }
 
-function ImagePreview({ content, name }: { content: string; name: string }) {
+function mimeFromName(name: string): string {
+  const ext = name.toLowerCase().split('.').pop() || ''
+  const map: Record<string, string> = {
+    png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
+    webp: 'image/webp', bmp: 'image/bmp', ico: 'image/x-icon', avif: 'image/avif', svg: 'image/svg+xml',
+    mp4: 'video/mp4', webm: 'video/webm', mov: 'video/quicktime', m4v: 'video/mp4', ogv: 'video/ogg',
+    pdf: 'application/pdf',
+  }
+  return map[ext] || 'application/octet-stream'
+}
+
+function useBinarySrc(content: string | Uint8Array, name: string): string {
+  const [url, setUrl] = useState<string>('')
+  useEffect(() => {
+    if (typeof content === 'string') { setUrl(content); return }
+    const blob = new Blob([content], { type: mimeFromName(name) })
+    const u = URL.createObjectURL(blob)
+    setUrl(u)
+    return () => URL.revokeObjectURL(u)
+  }, [content, name])
+  return url
+}
+
+function ImagePreview({ content: rawContent, name }: { content: string | Uint8Array; name: string }) {
+  const content = useBinarySrc(rawContent, name)
   const [zoom, setZoom] = useState(1)
   const [offset, setOffset] = useState({ x: 0, y: 0 })
   const dragRef = useRef<{ x: number; y: number; offsetX: number; offsetY: number } | null>(null)
@@ -1233,14 +1267,22 @@ function PaneTabHeader({
   const openEditorView = useWorkspaceStore((state) => state.openEditorView)
   const createFile = useWorkspaceStore((state) => state.createFile)
   const setActiveFile = useWorkspaceStore((state) => state.setActiveFile)
+  const sampleId = useWorkspaceStore((state) => state.sample.id)
   const assignFileToPane = useWorkspaceStore((state) => state.assignFileToPane)
   const splitFileToPane = useWorkspaceStore((state) => state.splitFileToPane)
+  const user = useIdentityStore((state) => state.user)
+  const namespaces = useNamespaceStore((state) => state.namespaces)
   const isRunning = runtime?.mode === 'server' && (runtime.status === 'running' || runtime.status === 'starting')
   const statusTone = isRunning
     ? 'text-bs-good'
     : runtime?.status === 'error'
       ? 'text-bs-error'
       : 'text-bs-text-faint'
+  const activeFile = files.find((file) => file.path === activePath) ?? null
+  const launchAuthorityStatus = activeFile?.name.split('/').pop()?.startsWith('server')
+    ? evaluateServerAuthorityStatus(preferredServerNameForProject(sampleId, paneId), user, namespaces)
+    : null
+  const canRunActive = isRunning || !launchAuthorityStatus || launchAuthorityStatus.allowed
   const unopenedFiles = files
     .filter((file) => !openFilePaths.includes(file.path))
     .map((file) => ({
@@ -1553,15 +1595,18 @@ function PaneTabHeader({
                   onRun?.()
                 }
               }}
+              disabled={!canRunActive}
               className={`flex h-5 w-5 shrink-0 items-center justify-center rounded text-[11px] leading-none ${
                 isRunning
                   ? 'bg-bs-error text-bs-accent-text'
                   : 'bg-bs-good text-bs-accent-text'
-              }`}
+              } disabled:cursor-not-allowed disabled:opacity-50`}
               aria-label={isRunning ? `Stop ${itemLabels[activePath ?? ''] ?? activePath ?? paneId}` : `Run ${itemLabels[activePath ?? ''] ?? activePath ?? paneId}`}
               title={
                 isRunning
                   ? 'Stop this pane runtime'
+                  : launchAuthorityStatus?.reason
+                    ? launchAuthorityStatus.reason
                   : runtime.mode === 'client' || (itemLabels[activePath ?? ''] ?? '').toLowerCase().startsWith('client')
                     ? 'Run this pane as a client'
                     : 'Run this pane as a server'
@@ -1722,7 +1767,7 @@ function syncDecorations(pane: PaneHandle, file: WorkspaceFile | null, highlight
 
   if (!editor || !model || !decorations) return
 
-  if (!highlightedHandler || !file?.name.endsWith('.ts') || !file.name.startsWith('server')) {
+  if (!highlightedHandler || !file?.name.endsWith('.ts') || !file.name.split('/').pop()?.startsWith('server')) {
     decorations.set([])
     return
   }

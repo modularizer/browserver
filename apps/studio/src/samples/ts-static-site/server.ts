@@ -9,9 +9,13 @@ class SiteApi {
     index: 'index.html',
   })
 
+  constructor() {
+    console.debug('[SiteApi] constructor called', { workspaceFiles: typeof __workspaceFiles, keys: Object.keys(__workspaceFiles || {}) });
+  }
+
   async health() {
     return { ok: true, timestamp: Date.now() }
   }
 }
 
-export default serveClientSideServer('ts-static-site', [SiteApi])
+export default serveClientSideServer('dmz/ts-static-site', [SiteApi])

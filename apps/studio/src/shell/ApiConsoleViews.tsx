@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import * as monaco from 'monaco-editor'
 import ts from 'typescript'
-import { connectClientSideServer } from '@modularizer/plat-client/client-server'
+import { connectBrowserverClientSideServer } from '../runtime/cssTransport'
 import { useRuntimeStore } from '../store/runtime'
 import type { RuntimeOperation } from '../runtime/types'
 
@@ -297,7 +297,7 @@ export function TsConsoleView() {
       )
 
       // Connect
-      const { client, openapi } = await connectClientSideServer({ baseUrl: targetUrl })
+      const { client, openapi } = await connectBrowserverClientSideServer(targetUrl)
 
       const consoleFn = (...args: unknown[]) => {
         const line = args.map((a) => typeof a === 'string' ? a : JSON.stringify(a)).join(' ')
@@ -609,7 +609,7 @@ export function CliEmulatorView() {
     if (clientRef.current && clientRef.current.url === targetUrl) {
       return clientRef.current.client
     }
-    const { client } = await connectClientSideServer({ baseUrl: targetUrl })
+    const { client } = await connectBrowserverClientSideServer(targetUrl)
     clientRef.current = { client, url: targetUrl }
     return client
   }

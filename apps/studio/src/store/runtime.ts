@@ -1,9 +1,12 @@
 import { create } from 'zustand'
-import { connectClientSideServer, OpenAPIClient } from '@modularizer/plat-client/client-server'
+import { OpenAPIClient } from '@modularizer/plat-client/client-server'
 import {
   startLocalTsRuntime,
 } from '../runtime/localTsRuntime'
+import { evaluateServerAuthorityStatus } from '../runtime/authorityPolicy'
+import { connectBrowserverClientSideServer } from '../runtime/cssTransport'
 import { runClientSource } from '../runtime/clientRunner'
+import { preferredServerNameForProject } from '../runtime/serverNames'
 import { startPythonRuntime } from '../runtime/pythonRuntime'
 import { buildCssTargetUrl, normalizeClientApiBaseUrl, normalizeCssTargetUrl, parseCssServerName } from '../runtime/clientTargetUrl'
 import { extractOperationsFromOpenApi } from '../runtime/openapiOperations'
@@ -15,6 +18,8 @@ import type {
   RuntimeOperation,
   RuntimeRequestTimelineEntry,
 } from '../runtime/types'
+import { useIdentityStore } from './identity'
+import { useNamespaceStore } from './namespace'
 import { useWorkspaceStore, type EditorPaneId } from './workspace'
 
 export interface RuntimeLogEntry {
@@ -239,6 +244,15 @@ function createEmptyTabSession(): TabRuntimeSession {
   return { ...EMPTY_TAB_SESSION }
 }
 
+function runtimeBaseName(name: string): string {
+  const parts = name.split('/')
+  return parts[parts.length - 1] ?? name
+}
+
+function isServerFileName(name: string): boolean {
+  return /^server\.(ts|tsx|py)$/i.test(runtimeBaseName(name.trim()))
+}
+
 function getPaneActivePath(pane: EditorPaneId): string | null {
   const paneTabs = useWorkspaceStore.getState().paneTabs[pane]
   return paneTabs.activePath ?? paneTabs.tabs[0] ?? null
@@ -287,11 +301,6 @@ function getDefaultClientTarget(state: RuntimeState): string {
   if (state.connectionUrl) return state.connectionUrl
   if (state.serverName) return buildCssTargetUrl(state.serverName)
   return ''
-}
-
-function preferredServerNameForProject(projectId: string, pane: EditorPaneId): string {
-  // Keep primary-pane routing canonical as css://<project-id>.
-  return pane === 'primary' ? projectId : `${projectId}-${pane}`
 }
 
 function formatTimelineStage(entry: RuntimeRequestTimelineEntry): string {
@@ -673,7 +682,7 @@ export const useRuntimeStore = create<RuntimeState>()((set, get) => ({
 
     syncVisibleRuntimeFromPane(set, get, pane)
 
-    if (targetFile.name.startsWith('server')) {
+    if (isServerFileName(targetFile.name)) {
       updateTabSession(set, get, targetFile.path, {
         mode: 'server',
         language: workspace.sample.serverLanguage,
@@ -694,6 +703,16 @@ export const useRuntimeStore = create<RuntimeState>()((set, get) => ({
       })
 
       try {
+        const desiredServerName = preferredServerNameForProject(workspace.sample.id, pane)
+        const authorityStatus = evaluateServerAuthorityStatus(
+          desiredServerName,
+          useIdentityStore.getState().user,
+          useNamespaceStore.getState().namespaces,
+        )
+        if (!authorityStatus.allowed) {
+          throw new Error(authorityStatus.reason ?? 'Server name is not allowed.')
+        }
+
         const existingHandle = runtimeHandles.get(targetFile.path)
         if (existingHandle) {
           await existingHandle.handle.stop()
@@ -703,7 +722,8 @@ export const useRuntimeStore = create<RuntimeState>()((set, get) => ({
         const handle = workspace.sample.serverLanguage === 'typescript'
           ? await startLocalTsRuntime({
               source: normalizeLegacyPlatClientImports(targetFile.content),
-              serverName: preferredServerNameForProject(workspace.sample.id, pane),
+              serverName: desiredServerName,
+              projectId: workspace.sample.id,
               workspaceFiles: workspace.files.map(f => ({ path: f.path, content: f.content })),
               onRequest: (direction, payload) => {
                 recordRuntimeTelemetry(set, get, targetFile.path, pane, direction, payload)
@@ -711,12 +731,12 @@ export const useRuntimeStore = create<RuntimeState>()((set, get) => ({
             })
           : await startPythonRuntime({
               source: targetFile.content,
-              serverName: preferredServerNameForProject(workspace.sample.id, pane),
+              serverName: desiredServerName,
             })
         runtimeHandles.set(targetFile.path, { pane, handle })
         playgroundClient = null
 
-        const expectedServerName = preferredServerNameForProject(workspace.sample.id, pane)
+        const expectedServerName = desiredServerName
         if (handle.serverName !== expectedServerName) {
           set({
             logs: [
@@ -765,11 +785,7 @@ export const useRuntimeStore = create<RuntimeState>()((set, get) => ({
           ],
         })
       } catch (error) {
-        console.error('Runtime startup error details:', error)
-        console.error('Error type:', typeof error)
-        console.error('Error constructor:', error?.constructor?.name)
-        console.error('Error message:', (error as any)?.message)
-        console.error('Error stack:', (error as any)?.stack)
+        console.error('Runtime startup error:', error)
         runtimeHandles.delete(targetFile.path)
         updateTabSession(set, get, targetFile.path, {
           mode: 'server',
@@ -1066,7 +1082,7 @@ export const useRuntimeStore = create<RuntimeState>()((set, get) => ({
 
     if (trimmed.startsWith('css://')) {
       try {
-        const { client, openapi } = await connectClientSideServer({ baseUrl: trimmed })
+        const { client, openapi } = await connectBrowserverClientSideServer(trimmed)
         playgroundClient = { baseUrl: normalizeCssTargetUrl(trimmed), client }
         const spec = openapi as Record<string, any>
         const operations = extractOperationsFromOpenApi(spec)

@@ -24,7 +24,7 @@ export default defineConfig(({ mode }) => ({
     target: 'es2022',
     outDir: 'dist',
     chunkSizeWarningLimit: 1000,
-    assetsInlineLimit: mode === 'singlefile' ? Number.MAX_SAFE_INTEGER : 4096,
+    assetsInlineLimit: Number.MAX_SAFE_INTEGER,
     rollupOptions: {
       output: {
         manualChunks: mode === 'singlefile'

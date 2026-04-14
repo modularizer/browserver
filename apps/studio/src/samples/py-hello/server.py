@@ -5,4 +5,4 @@ class HelloApi:
         """Say hello to someone by name."""
         return {"message": f"Hello, {name}!"}
 
-serve_client_side_server("py-hello", [HelloApi])
+serve_client_side_server("dmz/py-hello", [HelloApi])

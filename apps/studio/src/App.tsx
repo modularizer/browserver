@@ -3,6 +3,7 @@ import JSZip from 'jszip'
 import { gunzipSync, strFromU8 } from 'fflate'
 import type { DatabaseSnapshot } from '@browserver/database'
 import { listWorkspaceSnapshots, type WorkspaceSnapshot } from '@browserver/storage'
+import { buildDesktopProfileBundle, serializeDesktopProfileBundle } from './config/desktopProfileBundle'
 import { parseProjectBundle, serializeProjectBundle, type ProjectBundle } from './config/projectBundle'
 import { deleteAllBrowserData, deleteProjectData } from './store/clearData'
 import { BottomPanel } from './shell/BottomPanel'
@@ -23,9 +24,12 @@ import { useCommandPaletteStore } from './store/commandPalette'
 import { useCheckpointStore } from './store/checkpoints'
 import { useHistoryStore } from './store/history'
 import { useDatabaseStore } from './store/database'
+import { useIdentityStore } from './store/identity'
 import { layoutPresets, useLayoutStore } from './store/layout'
+import { useNamespaceStore } from './store/namespace'
 import { useRuntimeStore } from './store/runtime'
 import { useTrustStore } from './store/trust'
+import { preferredServerNameForProject } from './runtime/serverNames'
 import { themes, useThemeStore, applyCssVariables, applyMonacoTheme } from './theme'
 import { editorViewDefinitions, getEditorItemLabel, getEditorViewId, parseBrowserYaml, useWorkspaceStore, type EditorPaneId, type EditorViewId } from './store/workspace'
 
@@ -59,6 +63,8 @@ function baseName(path: string): string {
   const parts = path.split('/')
   return parts[parts.length - 1] ?? path
 }
+
+const DEFAULT_SAMPLE_ID = 'dmz/ts-static-site'
 
 function findFirstImportConflict(names: string[], existingNames: string[]): number {
   const seen = new Set(existingNames)
@@ -167,6 +173,7 @@ interface TitleBarProps {
   onApplyTheme: (themeId: string) => void
   onCreateCheckpoint: () => void
   onOpenExportModal: () => void
+  onExportDesktopProfile: () => void
   onOpenImportPicker: () => void
   onOpenCommandPalette: () => void
   onSetCommandQuery: (query: string) => void
@@ -184,6 +191,7 @@ function TitleBar({
   onApplyTheme,
   onCreateCheckpoint,
   onOpenExportModal,
+  onExportDesktopProfile,
   onOpenImportPicker,
   onOpenCommandPalette,
   onSetCommandQuery,
@@ -196,12 +204,13 @@ function TitleBar({
   const sample = useWorkspaceStore((state) => state.sample)
   const setActiveBottomPanel = useWorkspaceStore((state) => state.setActiveBottomPanel)
   const setActiveRightPanelTab = useWorkspaceStore((state) => state.setActiveRightPanelTab)
+  const openEditorView = useWorkspaceStore((state) => state.openEditorView)
 
   const projectMenu = [
     { id: 'project.checkpoint', label: 'Save checkpoint', hint: 'Local history', run: onCreateCheckpoint },
     { id: 'project.export', label: 'Export project', hint: 'Confirm first', run: onOpenExportModal },
+    { id: 'project.export-desktop', label: 'Export desktop profile', hint: 'Electron launcher bundle', run: onExportDesktopProfile },
     { id: 'project.import', label: 'Import project', hint: 'JSON bundle', run: onOpenImportPicker },
-    { id: 'project.settings', label: 'Open settings', hint: 'Theme + layout', run: onOpenSettings },
   ]
 
   const viewMenu = [
@@ -212,9 +221,10 @@ function TitleBar({
     { id: 'view.history', label: 'Open history panel', hint: 'Bottom', run: () => setActiveBottomPanel('history') },
   ]
 
-  const dataMenu = [
-    { id: 'data.delete-project', label: 'Delete current project data', hint: 'Workspace + DB + trust', run: onDeleteCurrentProject },
-    { id: 'data.delete-all', label: 'Delete ALL data', hint: 'Clears everything + reloads', run: onDeleteAllData },
+  const accountMenu = [
+    { id: 'account.settings', label: 'Settings', hint: 'Account & namespaces', run: () => openEditorView('namespace') },
+    { id: 'account.delete-project', label: 'Delete current project data', hint: 'Workspace + DB + trust', run: onDeleteCurrentProject },
+    { id: 'account.delete-all', label: 'Delete ALL data', hint: 'Clears everything + reloads', run: onDeleteAllData },
   ]
 
   const layoutMenu = (Object.entries(layoutPresets) as Array<[keyof typeof layoutPresets, (typeof layoutPresets)[keyof typeof layoutPresets]]>).map(([presetId, preset]) => ({
@@ -243,8 +253,13 @@ function TitleBar({
       </div>
       <div className="-ml-[10px] flex items-center gap-1">
         <MenuButton
+          label="Account"
+          title="Settings, account, and data management"
+          items={accountMenu}
+        />
+        <MenuButton
           label="File"
-          title="File actions: import, export, checkpoints, and settings"
+          title="File actions: import, export, and checkpoints"
           items={projectMenu}
         />
         <MenuButton
@@ -261,11 +276,6 @@ function TitleBar({
           label="Panels"
           title="Open and focus major workbench panels"
           items={viewMenu}
-        />
-        <MenuButton
-          label="Data"
-          title="Manage or delete stored project data"
-          items={dataMenu}
         />
       </div>
       {/* Search — absolutely centered in the full bar */}
@@ -327,6 +337,7 @@ export function App({ initialProjectId, onProjectRouteChange }: AppProps) {
   const [pendingRunningTabClose, setPendingRunningTabClose] = useState<PendingRunningTabClose | null>(null)
   const [externalFileDragActive, setExternalFileDragActive] = useState(false)
   const [routeNotice, setRouteNotice] = useState<string | null>(null)
+  const [desktopBootstrapReady, setDesktopBootstrapReady] = useState(() => !window.browserverDesktop?.isDesktop)
   const sidebarWidth = useLayoutStore((state) => state.sidebarWidth)
   const bottomHeight = useLayoutStore((state) => state.bottomHeight)
   const rightWidth = useLayoutStore((state) => state.rightWidth)
@@ -358,6 +369,8 @@ export function App({ initialProjectId, onProjectRouteChange }: AppProps) {
   const isSplitEditor = paneTabs.secondary.tabs.length > 0 || paneTabs.tertiary.tabs.length > 0
   const activeFilePath = useWorkspaceStore((state) => state.activeFilePath)
   const setActiveBottomPanel = useWorkspaceStore((state) => state.setActiveBottomPanel)
+  const updateFileContent = useWorkspaceStore((state) => state.updateFileContent)
+  const saveFile = useWorkspaceStore((state) => state.saveFile)
   const importWorkspace = useWorkspaceStore((state) => state.importSnapshot)
   const importExternalFiles = useWorkspaceStore((state) => state.importExternalFiles)
   const hydrateDatabase = useDatabaseStore((state) => state.hydrate)
@@ -379,6 +392,9 @@ export function App({ initialProjectId, onProjectRouteChange }: AppProps) {
   const stopTabByPath = useRuntimeStore((state) => state.stopTabByPath)
   const isTabRunning = useRuntimeStore((state) => state.isTabRunning)
   const runtimeStatus = useRuntimeStore((state) => state.status)
+  const launchedServerFilePath = useRuntimeStore((state) => state.launchedServerFilePath)
+  const runtimeServerName = useRuntimeStore((state) => state.serverName)
+  const clientTargetUrl = useRuntimeStore((state) => state.clientTargetUrl)
   const themeId = useThemeStore((state) => state.themeId)
   const applyThemeId = useThemeStore((state) => state.applyThemeId)
   const currentTheme = useThemeStore((state) => state.theme())
@@ -388,6 +404,13 @@ export function App({ initialProjectId, onProjectRouteChange }: AppProps) {
   const commandQuery = useCommandPaletteStore((state) => state.query)
   const setCommandQuery = useCommandPaletteStore((state) => state.setQuery)
   const layoutPresetId = useLayoutStore((state) => state.presetId)
+  const signedInUser = useIdentityStore((state) => state.user)
+  const maybeAutoReauthenticate = useIdentityStore((state) => state.maybeAutoReauthenticate)
+  const ensureAuthorityData = useNamespaceStore((state) => state.ensureAuthorityData)
+  const isAuthoritySessionExpired = useNamespaceStore((state) => state.isSessionExpired)
+  const namespaces = useNamespaceStore((state) => state.namespaces)
+  const openedSignedOutAccountPaneRef = useRef(false)
+  const convertedNamespaceProjectRef = useRef<string | null>(null)
   const layoutState = {
     sidebarWidth,
     bottomHeight,
@@ -397,6 +420,51 @@ export function App({ initialProjectId, onProjectRouteChange }: AppProps) {
     showRight,
   }
   const syncBrowserYaml = useWorkspaceStore((state) => state.syncBrowserYaml)
+
+  useEffect(() => {
+    // Handle JWT session token in hash fragment: #session_token=eyJh...
+    const hash = window.location.hash.slice(1)
+    const hashParams = new URLSearchParams(hash)
+    const sessionToken = hashParams.get('session_token')
+    if (sessionToken) {
+      const pictureData = hashParams.get('picture_data') ?? ''
+      useIdentityStore.getState().handleSessionToken(sessionToken, pictureData)
+      hashParams.delete('session_token')
+      hashParams.delete('picture_data')
+      const remainingHash = hashParams.toString()
+      const cleanUrl = `${window.location.pathname}${window.location.search}${remainingHash ? `#${remainingHash}` : ''}`
+      window.history.replaceState({}, '', cleanUrl)
+      return
+    }
+
+    // Legacy: handle oauthGrant in query string
+    const params = new URLSearchParams(window.location.search)
+    const grantId = params.get('oauthGrant')
+    if (!grantId) return
+
+    void useIdentityStore.getState().handleOAuthCallback(grantId).finally(() => {
+      const cleanUrl = `${window.location.pathname}${window.location.hash}`
+      window.history.replaceState({}, '', cleanUrl)
+    })
+  }, [])
+
+  useEffect(() => {
+    const hashParams = new URLSearchParams(window.location.hash.slice(1))
+    if (hashParams.get('session_token')) return
+    const queryParams = new URLSearchParams(window.location.search)
+    if (queryParams.get('oauthGrant')) return
+
+    if (signedInUser) {
+      void ensureAuthorityData().catch(() => {})
+      return
+    }
+    void maybeAutoReauthenticate()
+  }, [ensureAuthorityData, maybeAutoReauthenticate, signedInUser])
+
+  useEffect(() => {
+    if (!isAuthoritySessionExpired) return
+    void maybeAutoReauthenticate()
+  }, [isAuthoritySessionExpired, maybeAutoReauthenticate])
 
   const buildCurrentBundle = (): ProjectBundle => {
     const workspace: WorkspaceSnapshot = {
@@ -439,6 +507,28 @@ export function App({ initialProjectId, onProjectRouteChange }: AppProps) {
     const anchor = document.createElement('a')
     anchor.href = url
     anchor.download = `${sample.id}.browserver.json`
+    anchor.click()
+    URL.revokeObjectURL(url)
+  }
+
+  const exportDesktopProfile = () => {
+    const profileBundle = buildDesktopProfileBundle({
+      project: buildCurrentBundle(),
+      files,
+      projectId: sample.id,
+      projectName: sample.name,
+      serverLanguage: sample.serverLanguage,
+      activeFilePath,
+      launchedServerFilePath,
+      runtimeServerName,
+      preferredClientTarget: clientTargetUrl || null,
+    })
+    const source = serializeDesktopProfileBundle(profileBundle)
+    const blob = new Blob([source], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = `${sample.id}.browserver.desktop-profile.json`
     anchor.click()
     URL.revokeObjectURL(url)
   }
@@ -604,7 +694,7 @@ export function App({ initialProjectId, onProjectRouteChange }: AppProps) {
   const handleDeleteCurrentProject = async () => {
     await deleteProjectData(sample.id)
     // Switch to default sample to reset in-memory state
-    const defaultSampleId = samples[0].id
+    const defaultSampleId = samples.find((entry) => entry.id === DEFAULT_SAMPLE_ID)?.id ?? samples[0].id
     if (defaultSampleId) {
       await setSample(defaultSampleId)
     }
@@ -620,6 +710,80 @@ export function App({ initialProjectId, onProjectRouteChange }: AppProps) {
     const snapshots = await listWorkspaceSnapshots()
     setProjectList(snapshots)
   }
+
+  useEffect(() => {
+    if (!hydrated || desktopBootstrapReady) return
+
+    const desktop = window.browserverDesktop
+    if (!desktop?.isDesktop) {
+      setDesktopBootstrapReady(true)
+      return
+    }
+
+    let cancelled = false
+
+    void (async () => {
+      try {
+        const launchProfile = await desktop.getLaunchProfile()
+        if (!launchProfile?.bundle) return
+
+        const importMarkerKey = `browserver:desktop-profile-imported:${launchProfile.profileId}`
+        const importMarkerValue = String(launchProfile.bundle.exportedAt)
+        const shouldImport = window.localStorage.getItem(importMarkerKey) !== importMarkerValue
+
+        if (shouldImport) {
+          await importWorkspace(launchProfile.bundle.project.workspace)
+          await importDatabase(launchProfile.bundle.project.database)
+          if (launchProfile.bundle.project.trust) {
+            await importTrust(launchProfile.bundle.project.trust)
+          }
+          applyThemeId(launchProfile.bundle.project.ui.themeId)
+          if (
+            launchProfile.bundle.project.ui.presetId
+            && launchProfile.bundle.project.ui.presetId !== 'custom'
+            && launchProfile.bundle.project.ui.presetId in layoutPresets
+          ) {
+            activatePreset(launchProfile.bundle.project.ui.presetId)
+          } else {
+            applyLayout(
+              launchProfile.bundle.project.ui.layout,
+              launchProfile.bundle.project.ui.presetId ?? 'custom',
+            )
+          }
+          window.localStorage.setItem(importMarkerKey, importMarkerValue)
+          await refreshProjects()
+        }
+
+        const entrypointPath = launchProfile.bundle.profile.entrypointPath
+        if (launchProfile.bundle.profile.launchOnOpen && entrypointPath) {
+          setActiveFile(entrypointPath, 'primary')
+          await runPane('primary')
+        }
+      } catch (error) {
+        console.error('[desktop] launch profile bootstrap failed', error)
+        window.alert(error instanceof Error ? error.message : 'Could not load the desktop launch profile')
+      } finally {
+        if (!cancelled) {
+          setDesktopBootstrapReady(true)
+        }
+      }
+    })()
+
+    return () => {
+      cancelled = true
+    }
+  }, [
+    activatePreset,
+    applyLayout,
+    applyThemeId,
+    desktopBootstrapReady,
+    hydrated,
+    importDatabase,
+    importTrust,
+    importWorkspace,
+    runPane,
+    setActiveFile,
+  ])
 
   const createNewProject = async () => {
     const usedIds = new Set([
@@ -734,12 +898,28 @@ export function App({ initialProjectId, onProjectRouteChange }: AppProps) {
         run: exportBundle,
       },
       {
+        id: 'project.export-desktop',
+        title: 'Export desktop profile',
+        subtitle: 'Download an Electron launcher profile for this project',
+        keywords: ['download electron desktop launcher profile app'],
+        run: exportDesktopProfile,
+      },
+      {
         id: 'project.import',
         title: 'Import project bundle',
         subtitle: 'Load a previously exported browserver JSON bundle',
         keywords: ['upload load json'],
         run: openImportPicker,
       },
+      ...(window.browserverDesktop?.isDesktop
+        ? [{
+            id: 'desktop.import-profile',
+            title: 'Import desktop profile',
+            subtitle: 'Load a launcher bundle into this desktop shell',
+            keywords: ['electron desktop profile launcher import'],
+            run: () => void window.browserverDesktop?.importDesktopProfile(),
+          } satisfies CommandPaletteItem]
+        : []),
       {
         id: 'panel.history',
         title: 'Show history panel',
@@ -771,6 +951,12 @@ export function App({ initialProjectId, onProjectRouteChange }: AppProps) {
         run: () => setActiveBottomPanel('trust'),
       },
       {
+        id: 'panel.namespace',
+        title: 'Show namespace panel',
+        subtitle: 'Focus identity, namespace ownership, and server-name requests',
+        run: () => setActiveBottomPanel('namespace'),
+      },
+      {
         id: 'panel.data',
         title: 'Show data panel',
         subtitle: 'Focus the local database explorer',
@@ -788,6 +974,15 @@ export function App({ initialProjectId, onProjectRouteChange }: AppProps) {
         subtitle: 'Focus diagnostics and compile issues',
         run: () => setActiveBottomPanel('problems'),
       },
+      ...(signedInUser
+        ? [{
+            id: 'identity.signout',
+            title: 'Sign out',
+            subtitle: signedInUser.email || signedInUser.googleSub,
+            keywords: ['auth logout google'],
+            run: () => useIdentityStore.getState().signOut(),
+          } satisfies CommandPaletteItem]
+        : []),
     ]
 
     const sampleCommands = samples.map<CommandPaletteItem>((entry) => ({
@@ -821,12 +1016,14 @@ export function App({ initialProjectId, onProjectRouteChange }: AppProps) {
     activatePreset,
     applyThemeId,
     exportBundle,
+    exportDesktopProfile,
     layoutPresetId,
     openImportPicker,
     restartCurrentServer,
     runClientFile,
     saveCheckpoint,
     sample,
+    signedInUser,
     setActiveBottomPanel,
     setSample,
     startCurrentServer,
@@ -850,6 +1047,56 @@ export function App({ initialProjectId, onProjectRouteChange }: AppProps) {
     }
   }, [hydrate, initialProjectId])
 
+  useEffect(() => {
+    if (!hydrated || signedInUser || openedSignedOutAccountPaneRef.current) return
+    openedSignedOutAccountPaneRef.current = true
+    setActiveBottomPanel('namespace')
+  }, [hydrated, setActiveBottomPanel, signedInUser])
+
+  useEffect(() => {
+    if (!hydrated || !signedInUser || namespaces.length === 0) return
+    if (!sample.id.startsWith('dmz/')) return
+
+    const targetProjectId = preferredServerNameForProject(sample.id, 'primary')
+    if (!targetProjectId || targetProjectId === sample.id) return
+
+    const conversionKey = `${signedInUser.googleSub}:${sample.id}->${targetProjectId}`
+    if (convertedNamespaceProjectRef.current === conversionKey) return
+    convertedNamespaceProjectRef.current = conversionKey
+
+    const currentFiles = useWorkspaceStore.getState().files
+    const nextTextByPath = new Map<string, string>()
+
+    for (const file of currentFiles) {
+      if (!['typescript', 'python', 'javascript', 'html', 'css', 'json', 'markdown', 'yaml', 'plaintext'].includes(file.language)) {
+        continue
+      }
+      if (!file.content.includes(sample.id)) continue
+      nextTextByPath.set(file.path, file.content.replaceAll(sample.id, targetProjectId))
+    }
+
+    renameProjectSlug(targetProjectId)
+
+    const renamedFiles = useWorkspaceStore.getState().files
+    const changedPaths = renamedFiles
+      .filter((file) => nextTextByPath.has(file.path.replace(`/${targetProjectId}/`, `/${sample.id}/`)))
+      .map((file) => ({
+        path: file.path,
+        content: nextTextByPath.get(file.path.replace(`/${targetProjectId}/`, `/${sample.id}/`)) ?? file.content,
+      }))
+      .filter((entry) => {
+        const file = renamedFiles.find((candidate) => candidate.path === entry.path)
+        return file && file.content !== entry.content
+      })
+
+    void (async () => {
+      for (const entry of changedPaths) {
+        updateFileContent(entry.path, entry.content)
+        await saveFile(entry.path, `Switch ${sample.id} to ${targetProjectId}`)
+      }
+    })()
+  }, [hydrated, namespaces, renameProjectSlug, sample.id, saveFile, signedInUser, updateFileContent])
+
   const hasSyncedProjectRouteRef = useRef(false)
   useEffect(() => {
     if (!hydrated || !sample.id || !onProjectRouteChange) return
@@ -867,8 +1114,7 @@ export function App({ initialProjectId, onProjectRouteChange }: AppProps) {
   // Restart servers that were running before page refresh
   const hasRestoredServers = useRef(false)
   useEffect(() => {
-    if (!hydrated || hasRestoredServers.current) return
-    hasRestoredServers.current = true
+    if (!hydrated || !desktopBootstrapReady || hasRestoredServers.current) return
 
     let restoredAnyServer = false
 
@@ -897,12 +1143,22 @@ export function App({ initialProjectId, onProjectRouteChange }: AppProps) {
       }
     }
 
+    if (restoredAnyServer) {
+      hasRestoredServers.current = true
+      return
+    }
+
+    if (!signedInUser) {
+      return
+    }
+
     // Default sample startup behavior: if no runtime was restored, auto-run primary server tab.
     const isBuiltInSample = samples.some((entry) => entry.id === sample.id)
     if (!restoredAnyServer && isBuiltInSample) {
+      hasRestoredServers.current = true
       void runPane('primary')
     }
-  }, [hydrated, files, runPane, sample.id, setActiveFile])
+  }, [desktopBootstrapReady, hydrated, files, runPane, sample.id, setActiveFile, signedInUser])
 
   useEffect(() => {
     void refreshProjects()
@@ -928,9 +1184,9 @@ export function App({ initialProjectId, onProjectRouteChange }: AppProps) {
 
   // Keep .browserver.yaml in sync with theme and layout changes
   useEffect(() => {
-    if (!hydrated) return
+    if (!hydrated || !desktopBootstrapReady) return
     syncBrowserYaml()
-  }, [hydrated, syncBrowserYaml, themeId, sidebarWidth, bottomHeight, rightWidth, showSidebar, showBottom, showRight, runtimeStatus])
+  }, [desktopBootstrapReady, hydrated, syncBrowserYaml, themeId, sidebarWidth, bottomHeight, rightWidth, showSidebar, showBottom, showRight, runtimeStatus])
 
   useEffect(() => {
     void refreshProjects()
@@ -1177,6 +1433,7 @@ export function App({ initialProjectId, onProjectRouteChange }: AppProps) {
         onApplyTheme={applyThemeId}
         onCreateCheckpoint={() => void saveCheckpoint(`Checkpoint ${new Date().toLocaleTimeString()}`)}
         onOpenExportModal={() => setExportModalOpen(true)}
+        onExportDesktopProfile={exportDesktopProfile}
         onOpenImportPicker={openImportPicker}
         onOpenCommandPalette={openCommandPalette}
         onSetCommandQuery={setCommandQuery}

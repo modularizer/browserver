@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Loading site…</title>
+    <style>
+      html, body { margin: 0; height: 100%; background: #111; color: #888;
+        font-family: system-ui, sans-serif; }
+      #bootstrap { position: fixed; inset: 0; display: flex; align-items: center;
+        justify-content: center; flex-direction: column; gap: 0.5rem; font-size: 0.9rem; }
+      #bootstrap.error { color: #e55; }
+    </style>
+  </head>
+  <body>
+    <div id="bootstrap">Connecting…</div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

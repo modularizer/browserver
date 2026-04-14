@@ -41,6 +41,7 @@ export function ClientTargetField({ className = '' }: ClientTargetFieldProps) {
     const found = new Set<string>()
 
     for (const file of files) {
+      if (typeof file.content !== 'string') continue
       const matches = file.content.match(urlPattern)
       if (!matches) continue
       for (const match of matches) {

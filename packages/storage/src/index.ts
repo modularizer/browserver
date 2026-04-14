@@ -18,7 +18,7 @@ export type StoredWorkspaceLanguage =
 export interface StoredWorkspaceFile {
   path: string
   language: StoredWorkspaceLanguage
-  content: string
+  content: string | Uint8Array
   updatedAt: number
 }
 

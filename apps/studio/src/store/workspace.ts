@@ -1,4 +1,4 @@
- import { create } from 'zustand'
+import { create } from 'zustand'
 import {
   loadWorkspaceSnapshot,
   saveWorkspaceSnapshot,
@@ -7,7 +7,7 @@ import {
   type StoredWorkspaceFile,
   StoredWorkspaceLanguage,
 } from '@browserver/storage'
-import { samples, type Sample, type SampleFile } from '../samples'
+import { samplesPromise, type Sample, type SampleFile } from '../samples'
 import { useHistoryStore } from './history'
 import { useLayoutStore } from './layout'
 import { useThemeStore } from '../theme'
@@ -16,7 +16,7 @@ export interface WorkspaceFile extends StoredWorkspaceFile {
   name: string
 }
 
-export type BottomPanelId = 'logs' | 'calls' | 'build' | 'problems' | 'client' | 'data' | 'trust' | 'history'
+export type BottomPanelId = 'logs' | 'calls' | 'build' | 'problems' | 'client' | 'data' | 'trust' | 'history' | 'namespace'
 export type WorkbenchPanelId = 'sidebar' | 'editor' | 'inspector' | 'bottom'
 export type EditorPaneId = 'primary' | 'secondary' | 'tertiary'
 export type RightPanelTabId = 'inspector' | 'client' | 'trust'
@@ -29,6 +29,7 @@ export type EditorViewId =
   | 'data'
   | 'trust'
   | 'history'
+  | 'namespace'
   | 'logs'
   | 'calls'
   | 'build'
@@ -62,6 +63,7 @@ export const editorViewDefinitions: Array<{ id: EditorViewId; label: string }> =
   { id: 'data', label: 'Data' },
   { id: 'trust', label: 'Trust' },
   { id: 'history', label: 'History' },
+  { id: 'namespace', label: 'Account' },
   { id: 'logs', label: 'Logs' },
   { id: 'calls', label: 'Calls' },
   { id: 'build', label: 'Build' },
@@ -126,11 +128,23 @@ interface WorkspaceState {
 
 const saveTimers = new Map<string, number>()
 export const ACTIVE_WORKSPACE_KEY = 'browserver:active-workspace'
+const DEFAULT_SAMPLE_ID = 'dmz/ts-static-site'
+let SAMPLES: Sample[] = []
+let DEFAULT_SAMPLE: Sample | undefined
+
+async function ensureSamplesLoaded() {
+  if (SAMPLES.length === 0) {
+    SAMPLES = await samplesPromise
+    DEFAULT_SAMPLE = SAMPLES.find((entry) => entry.id === DEFAULT_SAMPLE_ID) ?? SAMPLES[0]
+  }
+}
+
 const editorPaneOrder: EditorPaneId[] = ['primary', 'secondary', 'tertiary']
 const WORKSPACE_UI_KEY_PREFIX = 'browserver:workspace-ui:'
 
 function toPath(sampleId: string, fileName: string): string {
-  return `/${sampleId}/${fileName}`
+  // Store all files at the project root (no sample id prefix)
+  return `/${fileName}`
 }
 
 export function editorViewPath(viewId: EditorViewId, instanceId = crypto.randomUUID()): string {
@@ -233,6 +247,38 @@ function normalizeImportedFileName(files: WorkspaceFile[], requestedName: string
   return candidate
 }
 
+function stripImportedProjectPrefix(requestedName: string, projectId: string): string {
+  const cleaned = requestedName.replace(/^\/+/, '').trim()
+  if (!cleaned) return cleaned
+
+  const normalizedProject = projectId.replace(/^\/+|\/+$/g, '')
+  const projectLeaf = normalizedProject.split('/').filter(Boolean).at(-1) ?? ''
+  const candidates = [normalizedProject, projectLeaf].filter(Boolean)
+  const segments = cleaned.split('/').filter(Boolean)
+
+  for (const candidate of candidates) {
+    if (cleaned === candidate) {
+      return ''
+    }
+    if (cleaned.startsWith(`${candidate}/`)) {
+      const stripped = cleaned.slice(candidate.length).replace(/^\/+/, '')
+      if (stripped) return stripped
+    }
+
+    const candidateSegments = candidate.split('/').filter(Boolean)
+    for (let index = 0; index <= segments.length - candidateSegments.length; index += 1) {
+      const matches = candidateSegments.every((segment, offset) => segments[index + offset] === segment)
+      if (!matches) continue
+      const strippedSegments = segments.slice(index + candidateSegments.length)
+      if (strippedSegments.length > 0) {
+        return strippedSegments.join('/')
+      }
+    }
+  }
+
+  return cleaned
+}
+
 function languageFromFileName(name: string): StoredWorkspaceFile['language'] {
   const lower = name.toLowerCase()
   if (lower.endsWith('.zip') || lower.endsWith('.tar.gz') || lower.endsWith('.tgz')) return 'archive'
@@ -296,7 +342,7 @@ function isVideoName(name: string): boolean {
   return languageFromFileName(name) === 'video'
 }
 
-function readImportedFileContent(file: File, requestedName: string): Promise<string> {
+function readImportedFileContent(file: File, requestedName: string): Promise<string | Uint8Array> {
   if (
     !isRasterImageName(requestedName || file.name)
     && !isVideoName(requestedName || file.name)
@@ -307,12 +353,7 @@ function readImportedFileContent(file: File, requestedName: string): Promise<str
     return file.text()
   }
 
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onload = () => resolve(typeof reader.result === 'string' ? reader.result : '')
-    reader.onerror = () => reject(reader.error ?? new Error(`Failed to read ${file.name}`))
-    reader.readAsDataURL(file)
-  })
+  return file.arrayBuffer().then((buf) => new Uint8Array(buf))
 }
 
 function parentFolderName(name: string): string | null {
@@ -410,10 +451,9 @@ function renameWorkspaceFiles(
 }
 
 function fileNameFromPath(path: string): string {
+  // With root-level files, just strip leading slash
   if (!path.startsWith('/')) return path
-  const parts = path.split('/').filter(Boolean)
-  if (parts.length <= 1) return parts[0] ?? path
-  return parts.slice(1).join('/')
+  return path.slice(1)
 }
 
 function sampleToSnapshot(sample: Sample): WorkspaceSnapshot {
@@ -438,6 +478,42 @@ function snapshotToFiles(snapshot: WorkspaceSnapshot): WorkspaceFile[] {
     ...file,
     name: fileNameFromPath(file.path),
   }))
+}
+
+function normalizeSnapshot(snapshot: WorkspaceSnapshot): WorkspaceSnapshot {
+  const canonicalFiles = new Map<string, StoredWorkspaceFile>()
+
+  for (const file of snapshot.files) {
+    const canonicalName = stripImportedProjectPrefix(fileNameFromPath(file.path), snapshot.id) || fileNameFromPath(file.path)
+    const canonicalPath = toPath(snapshot.id, canonicalName)
+    const existing = canonicalFiles.get(canonicalName)
+
+    if (!existing || (file.updatedAt ?? 0) >= (existing.updatedAt ?? 0)) {
+      canonicalFiles.set(canonicalName, {
+        ...file,
+        path: canonicalPath,
+      })
+    }
+  }
+
+  const nextFiles = Array.from(canonicalFiles.values())
+  const unchanged = nextFiles.length === snapshot.files.length
+    && nextFiles.every((file, index) => {
+      const original = snapshot.files[index]
+      return original
+        && original.path === file.path
+        && original.language === file.language
+        && original.content === file.content
+        && original.updatedAt === file.updatedAt
+    })
+
+  if (unchanged) return snapshot
+
+  return {
+    ...snapshot,
+    files: nextFiles,
+    updatedAt: Date.now(),
+  }
 }
 
 function mergeSampleSnapshot(sample: Sample, snapshot: WorkspaceSnapshot): WorkspaceSnapshot {
@@ -490,11 +566,12 @@ function buildSampleFromSnapshot(sample: Sample, snapshot: WorkspaceSnapshot): S
 function queueSave(
   snapshot: WorkspaceSnapshot,
   clearDirty: () => void,
+  delayMs = 250,
 ) {
   const existing = saveTimers.get(snapshot.id)
   if (existing) window.clearTimeout(existing)
 
-  const timeout = window.setTimeout(() => {
+  const commit = () => {
     void saveWorkspaceSnapshot(snapshot)
       .then(() => {
         clearDirty()
@@ -503,7 +580,14 @@ function queueSave(
         console.error('Workspace snapshot save failed', error)
       })
     saveTimers.delete(snapshot.id)
-  }, 250)
+  }
+
+  if (delayMs <= 0) {
+    commit()
+    return
+  }
+
+  const timeout = window.setTimeout(commit, delayMs)
 
   saveTimers.set(snapshot.id, timeout)
 }
@@ -523,6 +607,37 @@ function currentSnapshot(state: WorkspaceState): WorkspaceSnapshot {
   }
 }
 
+function collectFolderPathsFromFiles(files: WorkspaceFile[]): string[] {
+  const folders = new Set<string>()
+
+  for (const file of files) {
+    const parts = file.name.split('/').filter(Boolean)
+    let current = ''
+    for (let index = 0; index < parts.length - 1; index += 1) {
+      current = current ? `${current}/${parts[index]}` : parts[index] ?? ''
+      if (current) {
+        folders.add(current)
+      }
+    }
+  }
+
+  return Array.from(folders)
+}
+
+function normalizeWorkspaceFolders(files: WorkspaceFile[], folders: string[], projectId: string): string[] {
+  const fileDerivedFolders = new Set(collectFolderPathsFromFiles(files))
+  const normalizedExplicitFolders = folders
+    .map((folder) => stripImportedProjectPrefix(folder, projectId))
+    .map((folder) => folder.replace(/^\/+|\/+$/g, ''))
+    .filter(Boolean)
+
+  for (const folder of normalizedExplicitFolders) {
+    fileDerivedFolders.add(folder)
+  }
+
+  return Array.from(fileDerivedFolders).sort((a, b) => a.localeCompare(b))
+}
+
 function workspaceUiKey(workspaceId: string): string {
   return `${WORKSPACE_UI_KEY_PREFIX}${workspaceId}`
 }
@@ -530,7 +645,13 @@ function workspaceUiKey(workspaceId: string): string {
 function persistWorkspaceUiState(workspaceId: string, session: WorkspaceEditorSession) {
   window.localStorage.setItem(workspaceUiKey(workspaceId), JSON.stringify(session))
   try {
-    useWorkspaceStore.getState().syncBrowserYaml()
+    queueMicrotask(() => {
+      try {
+        useWorkspaceStore.getState().syncBrowserYaml()
+      } catch {
+        // ignore
+      }
+    })
   } catch {
     // ignore
   }
@@ -648,9 +769,13 @@ function normalizeEditorSession(
     : resolveActiveFilePath(sessionPaneTabs, activeEditorPane)
 
   return {
-    folders: Array.isArray(session.folders)
-      ? Array.from(new Set(session.folders.filter((folder): folder is string => typeof folder === 'string' && !!folder.trim())))
-      : [],
+    folders: normalizeWorkspaceFolders(
+      files,
+      Array.isArray(session.folders)
+        ? session.folders.filter((folder): folder is string => typeof folder === 'string' && !!folder.trim())
+        : [],
+      files[0]?.path.split('/').filter(Boolean)[0] ?? '',
+    ),
     openFilePaths: deriveOpenFilePaths(sessionPaneTabs),
     paneTabs: sessionPaneTabs,
     paneFiles,
@@ -678,8 +803,14 @@ async function loadSampleWorkspace(sampleId: string): Promise<{
   sample: Sample
   files: WorkspaceFile[]
 }> {
-  const seedSample = samples.find((entry) => entry.id === sampleId) ?? null
-  const persisted = await loadWorkspaceSnapshot(sampleId)
+  await ensureSamplesLoaded()
+  const seedSample = SAMPLES.find((entry) => entry.id === sampleId) ?? null
+  const persistedRaw = await loadWorkspaceSnapshot(sampleId)
+  const persisted = persistedRaw ? normalizeSnapshot(persistedRaw) : null
+
+  if (persisted && persistedRaw !== persisted) {
+    await saveWorkspaceSnapshot(persisted)
+  }
 
   if (!seedSample && persisted) {
     return {
@@ -688,8 +819,8 @@ async function loadSampleWorkspace(sampleId: string): Promise<{
     }
   }
 
-  const fallbackSample = seedSample ?? samples[0]
-  const snapshot = mergeSampleSnapshot(fallbackSample, persisted ?? sampleToSnapshot(fallbackSample))
+  const fallbackSample = seedSample ?? DEFAULT_SAMPLE!
+  const snapshot = persisted ?? sampleToSnapshot(fallbackSample)
 
   if (!persisted) {
     await saveWorkspaceSnapshot(snapshot)
@@ -985,8 +1116,8 @@ export const useWorkspaceStore = create<WorkspaceState>()((set, get) => ({
   syncBrowserYaml: () => {
     const state = get()
     if (!state.hydrated) return
-    const name = '.browserver.yaml'
-    const path = toPath(state.sample.id, name)
+    const path = toPath(state.sample.id, '.browserver.yaml')
+    const name = fileNameFromPath(path)
     if (state.dirtyFilePaths.includes(path)) return
 
     const themeId = useThemeStore.getState().themeId
@@ -1028,20 +1159,22 @@ export const useWorkspaceStore = create<WorkspaceState>()((set, get) => ({
       showRight: layout.showRight,
     }, { ...session, activePanel: state.activePanel }, runtimeInfo)
     
-    const existing = state.files.find((f) => f.name === name)
+    const sampleFileName = '.browserver.yaml'
+    const existing = state.files.find((f) => f.path === path)
     if (existing && existing.content === yaml) return
     const now = Date.now()
     const files = existing
-      ? state.files.map((f) => f.name === name ? { ...f, content: yaml, updatedAt: now } : f)
+      ? state.files.map((f) => f.path === path ? { ...f, content: yaml, updatedAt: now } : f)
       : [...state.files, { path, name, language: 'yaml' as StoredWorkspaceLanguage, content: yaml, updatedAt: now }]
-    const sample = existing
+    const sampleFileExists = state.sample.files.some((f) => f.name === sampleFileName)
+    const sample = sampleFileExists
       ? {
           ...state.sample,
-          files: state.sample.files.map((f) => f.name === name ? ({ ...f, content: yaml }) as SampleFile : f),
+          files: state.sample.files.map((f) => f.name === sampleFileName ? ({ ...f, content: yaml }) as SampleFile : f),
         }
       : {
           ...state.sample,
-          files: [...state.sample.files, { name, language: 'yaml' as StoredWorkspaceLanguage, content: yaml } as SampleFile],
+          files: [...state.sample.files, { name: sampleFileName, language: 'yaml' as StoredWorkspaceLanguage, content: yaml } as SampleFile],
         }
     set({ files, sample })
     queueSave(currentSnapshot({ ...state, files, sample }), () => {
@@ -1051,28 +1184,25 @@ export const useWorkspaceStore = create<WorkspaceState>()((set, get) => ({
     })
   },
   hydrated: false,
-  sample: samples[0],
-  files: sampleToSnapshot(samples[0]).files.map((file) => ({
-    ...file,
-    name: fileNameFromPath(file.path),
-  })),
+  sample: { id: '', name: '', description: '', serverLanguage: 'typescript', files: [] },
+  files: [],
   folders: [],
-  openFilePaths: [toPath(samples[0].id, samples[0].files[0].name)],
+  openFilePaths: [],
   dirtyFilePaths: [],
   saveState: 'idle',
   saveError: null,
   paneTabs: {
-    primary: { tabs: [toPath(samples[0].id, samples[0].files[0].name)], activePath: toPath(samples[0].id, samples[0].files[0].name) },
+    primary: { tabs: [], activePath: null },
     secondary: { tabs: [], activePath: null },
     tertiary: { tabs: [], activePath: null },
   },
   paneFiles: {
-    primary: toPath(samples[0].id, samples[0].files[0].name),
+    primary: null,
     secondary: null,
     tertiary: null,
   },
   activeEditorPane: 'primary',
-  activeFilePath: toPath(samples[0].id, samples[0].files[0].name),
+  activeFilePath: '',
   activeBottomPanel: 'logs',
   activePanel: 'editor',
   activeRightPanelTab: 'client',
@@ -1094,12 +1224,13 @@ export const useWorkspaceStore = create<WorkspaceState>()((set, get) => ({
     }
   },
   hydrate: async (preferredId) => {
+    await ensureSamplesLoaded()
     const explicitPreferredId = preferredId?.trim() || null
-    let resolvedPreferredId = explicitPreferredId ?? window.localStorage.getItem(ACTIVE_WORKSPACE_KEY) ?? get().sample.id
+    let resolvedPreferredId = explicitPreferredId ?? window.localStorage.getItem(ACTIVE_WORKSPACE_KEY) ?? DEFAULT_SAMPLE_ID
     let matchedExplicitRoute = true
 
     if (explicitPreferredId) {
-      const builtInExists = samples.some((entry) => entry.id === explicitPreferredId)
+      const builtInExists = SAMPLES.some((entry) => entry.id === explicitPreferredId)
       const persistedExists = builtInExists ? true : Boolean(await loadWorkspaceSnapshot(explicitPreferredId))
       matchedExplicitRoute = builtInExists || persistedExists
       if (matchedExplicitRoute) {
@@ -1132,6 +1263,7 @@ export const useWorkspaceStore = create<WorkspaceState>()((set, get) => ({
     return !explicitPreferredId || matchedExplicitRoute
   },
   setSample: async (id: string) => {
+    await ensureSamplesLoaded()
     const { sample, files } = await loadSampleWorkspace(id)
     const session = loadWorkspaceUiState(sample.id, files)
 
@@ -1154,9 +1286,10 @@ export const useWorkspaceStore = create<WorkspaceState>()((set, get) => ({
     persistActiveWorkspaceId(sample.id)
   },
   importSnapshot: async (snapshot) => {
+    await ensureSamplesLoaded()
     await saveWorkspaceSnapshot(snapshot)
     const files = snapshotToFiles(snapshot)
-    const seedSample = samples.find((entry) => entry.id === snapshot.id)
+    const seedSample = SAMPLES.find((entry) => entry.id === snapshot.id)
     const sample = seedSample
       ? buildSampleFromSnapshot(seedSample, snapshot)
       : buildImportedSample(snapshot)
@@ -1359,7 +1492,7 @@ export const useWorkspaceStore = create<WorkspaceState>()((set, get) => ({
           set({ saveState: 'idle' })
         }
       }, 1200)
-    })
+    }, 0)
 
     persistWorkspaceUiState(state.sample.id, {
       ...buildEditorSessionSnapshot({
@@ -1426,7 +1559,7 @@ export const useWorkspaceStore = create<WorkspaceState>()((set, get) => ({
           set({ saveState: 'idle' })
         }
       }, 1200)
-    })
+    }, 0)
 
     persistWorkspaceUiState(state.sample.id, {
       ...buildEditorSessionSnapshot(nextState),
@@ -1486,7 +1619,7 @@ export const useWorkspaceStore = create<WorkspaceState>()((set, get) => ({
           set({ saveState: 'idle' })
         }
       }, 1200)
-    })
+    }, 0)
 
     persistWorkspaceUiState(state.sample.id, {
       ...buildEditorSessionSnapshot({ ...state, ...nextState }),
@@ -1559,7 +1692,7 @@ export const useWorkspaceStore = create<WorkspaceState>()((set, get) => ({
           set({ saveState: 'idle' })
         }
       }, 1200)
-    })
+    }, 0)
 
     persistWorkspaceUiState(state.sample.id, {
       ...buildEditorSessionSnapshot({ ...state, ...nextState }),
@@ -1594,7 +1727,7 @@ export const useWorkspaceStore = create<WorkspaceState>()((set, get) => ({
           set({ saveState: 'idle' })
         }
       }, 1200)
-    })
+    }, 0)
 
     persistWorkspaceUiState(state.sample.id, {
       ...buildEditorSessionSnapshot({
@@ -1643,7 +1776,7 @@ export const useWorkspaceStore = create<WorkspaceState>()((set, get) => ({
           set({ saveState: 'idle' })
         }
       }, 1200)
-    })
+    }, 0)
 
     persistWorkspaceUiState(state.sample.id, {
       ...buildEditorSessionSnapshot({
@@ -1696,7 +1829,7 @@ export const useWorkspaceStore = create<WorkspaceState>()((set, get) => ({
       const importedAt = Date.now()
       const importedFiles = contents.map(({ sourceFile, requestedName, content }) => {
         const targetName = folderName ? `${folderName}/${requestedName}` : requestedName
-        const cleanedRequestedName = targetName.replace(/^\/+/, '')
+        const cleanedRequestedName = stripImportedProjectPrefix(targetName, state.sample.id)
         const name = normalizeImportedFileName(state.files, cleanedRequestedName)
         return {
           path: toPath(state.sample.id, name),
@@ -1748,7 +1881,7 @@ export const useWorkspaceStore = create<WorkspaceState>()((set, get) => ({
             set({ saveState: 'idle' })
           }
         }, 1200)
-      })
+      }, 0)
 
       persistWorkspaceUiState(state.sample.id, {
         ...buildEditorSessionSnapshot({ ...state, ...nextState }),
@@ -2091,7 +2224,7 @@ export const useWorkspaceStore = create<WorkspaceState>()((set, get) => ({
       return
     }
 
-    if (file.name === '.browserver.yaml') {
+    if (file.name.endsWith('.browserver.yaml')) {
       try {
         const config = parseBrowserYaml(file.content)
         if (!config.theme || typeof config.layout?.sidebarWidth !== 'number') {

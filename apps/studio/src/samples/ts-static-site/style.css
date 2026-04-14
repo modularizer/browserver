@@ -20,6 +20,16 @@ body {
   padding: 2rem;
 }
 
+.hero-badge {
+  display: block;
+  width: 96px;
+  height: 96px;
+  margin: 0 auto 1.25rem;
+  image-rendering: pixelated;
+  border-radius: 20px;
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.3);
+}
+
 h1 {
   font-size: 2rem;
   margin-bottom: 1rem;

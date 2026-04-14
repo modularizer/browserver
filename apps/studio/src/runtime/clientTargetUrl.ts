@@ -22,18 +22,24 @@ export function normalizeClientApiBaseUrl(raw: string): string {
 }
 
 export function normalizeCssTargetUrl(url: string): string {
-  return url.trim().replace(/\/$/, '')
+  const parsed = parseCssServerName(url)
+  if (!parsed) return url.trim().replace(/\/$/, '')
+  return buildCssTargetUrl(parsed)
 }
 
 export function buildCssTargetUrl(serverName: string): string {
   const normalizedName = serverName.trim().replace(/^\/+|\/+$/g, '')
   if (!normalizedName) return 'css://'
-  const encoded = normalizedName
+  const segments = normalizedName
     .split('/')
     .filter(Boolean)
     .map((segment) => encodeURIComponent(segment))
-    .join('%2F')
-  return `css://${encoded}`
+
+  if (segments.length <= 1) {
+    return `css://${segments[0] ?? ''}`
+  }
+
+  return `css:///${segments.join('/')}`
 }
 
 export function parseCssServerName(url: string): string | null {
@@ -42,7 +48,9 @@ export function parseCssServerName(url: string): string | null {
 
   try {
     const parsed = new URL(trimmed)
-    const rawName = [parsed.host, parsed.pathname.replace(/^\/+/, '')].filter(Boolean).join('/')
+    const rawName = parsed.host
+      ? [parsed.host, parsed.pathname.replace(/^\/+/, '')].filter(Boolean).join('/')
+      : parsed.pathname.replace(/^\/+/, '')
     if (!rawName) return null
     return decodeURIComponent(rawName).replace(/^\/+|\/+$/g, '') || null
   } catch {
@@ -55,4 +63,3 @@ export function parseCssServerName(url: string): string | null {
     }
   }
 }
-

@@ -1,0 +1,15 @@
+{
+  "name": "@browserver/site-viewer",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@modularizer/plat-client": "file:/home/mod/Code/plat/typescript_client"
+  }
+}

@@ -21,4 +21,4 @@ class MathApi {
   }
 }
 
-export default serveClientSideServer('ts-math', [MathApi])
+export default serveClientSideServer('dmz/ts-math', [MathApi])

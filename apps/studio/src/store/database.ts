@@ -54,7 +54,7 @@ function createSeedTables(sample: Sample): DatabaseTable[] {
     ]
   }
 
-  if (sample.id === 'ts-math') {
+  if (sample.id.endsWith('/ts-math')) {
     return [
       {
         name: 'jobs',
