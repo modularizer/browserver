@@ -9,7 +9,7 @@ import TsWorker from 'monaco-editor/esm/vs/language/typescript/ts.worker?worker&
 import { evaluateServerAuthorityStatus } from '../runtime/authorityPolicy'
 import { buildSiteViewerUrl } from '../runtime/siteViewerUrl'
 import { preferredServerNameForProject } from '../runtime/serverNames'
-import { setupMonacoTypeEnvironment } from '../editor/setupMonaco'
+import { setupMonacoTypeEnvironment, setupPackageJsonCodeLens } from '../editor/setupMonaco'
 import { EditorViewHost } from './EditorViewHost'
 import { MarkdownPreview, MarkdownToolbar, type MdMode } from './MarkdownPane'
 import { HtmlPreview, HtmlToolbar, type HtmlMode } from './HtmlPane'
@@ -20,7 +20,7 @@ import { Resizer } from './Resizer'
 import { useIdentityStore } from '../store/identity'
 import { useLayoutStore } from '../store/layout'
 import { useNamespaceStore } from '../store/namespace'
-import { selectTabRuntimeSession, useRuntimeStore } from '../store/runtime'
+import { getFileRunMode, selectTabRuntimeSession, useRuntimeStore } from '../store/runtime'
 import {
   editorViewDefinitions,
   getEditorItemLabels,
@@ -276,6 +276,7 @@ export function Editor({
 
   useEffect(() => {
     setupMonacoTypeEnvironment()
+    setupPackageJsonCodeLens()
   }, [])
 
   useEffect(() => {
@@ -1282,7 +1283,8 @@ function PaneTabHeader({
   const launchAuthorityStatus = activeFile?.name.split('/').pop()?.startsWith('server')
     ? evaluateServerAuthorityStatus(preferredServerNameForProject(sampleId, paneId), user, namespaces)
     : null
-  const canRunActive = isRunning || !launchAuthorityStatus || launchAuthorityStatus.allowed
+  const runMode = getFileRunMode(activeFile?.name)
+  const canRunActive = runMode !== 'hidden' && (isRunning || !launchAuthorityStatus || launchAuthorityStatus.allowed)
   const unopenedFiles = files
     .filter((file) => !openFilePaths.includes(file.path))
     .map((file) => ({
@@ -1581,7 +1583,7 @@ function PaneTabHeader({
         </div>
       </div>
       <div className="flex h-full flex-none items-center gap-2 bg-bs-tab-inactive pl-3">
-        {runtime ? (
+        {runtime && runMode !== 'hidden' ? (
           <>
             <span className={`text-[9px] uppercase leading-none tracking-wide ${statusTone}`}>
               {runtime.status}
@@ -1605,11 +1607,13 @@ function PaneTabHeader({
               title={
                 isRunning
                   ? 'Stop this pane runtime'
+                  : runMode === 'package-dev'
+                    ? 'Run npm run dev for this package'
                   : launchAuthorityStatus?.reason
                     ? launchAuthorityStatus.reason
-                  : runtime.mode === 'client' || (itemLabels[activePath ?? ''] ?? '').toLowerCase().startsWith('client')
-                    ? 'Run this pane as a client'
-                    : 'Run this pane as a server'
+                    : runtime.mode === 'client' || (itemLabels[activePath ?? ''] ?? '').toLowerCase().startsWith('client')
+                      ? 'Run this pane as a client'
+                      : 'Run this pane as a server'
               }
             >
               {isRunning ? '■' : '▶'}

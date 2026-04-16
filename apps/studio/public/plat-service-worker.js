@@ -40,9 +40,10 @@ function isWorkbenchPath(pathname) {
   const stripped = stripBasePath(pathname)
   if (!stripped || stripped === '/') return true
   if (stripped.startsWith('/__css/')) return false
+  if (stripped === '/site' || stripped.startsWith('/site/')) return false
   if (stripped.startsWith('/assets/')) return true
   if (stripped === '/plat-service-worker.js') return true
-  return /\/bs\/?$/.test(stripped)
+  return true
 }
 
 function isDevOrAppAssetPath(pathname) {

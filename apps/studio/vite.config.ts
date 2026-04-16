@@ -14,6 +14,7 @@ export default defineConfig(({ mode }) => ({
     alias: {
       '@modularizer/plat/client-server': '@modularizer/plat-client/client-server',
       '@modularizer/plat/client': '@modularizer/plat-client',
+      '@browserver/bundler': path.resolve(__dirname, '../../packages/bundler/src/index.ts'),
       '@browserver/core': path.resolve(__dirname, '../../packages/core/src/index.ts'),
       '@browserver/database': path.resolve(__dirname, '../../packages/database/src/index.ts'),
       '@browserver/runtime': path.resolve(__dirname, '../../packages/runtime/src/index.ts'),

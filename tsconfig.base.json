@@ -11,6 +11,7 @@
     "skipLibCheck": true,
     "baseUrl": ".",
     "paths": {
+      "@browserver/bundler": ["packages/bundler/src/index.ts"],
       "@browserver/core": ["packages/core/src/index.ts"],
       "@browserver/database": ["packages/database/src/index.ts"],
       "@browserver/runtime": ["packages/runtime/src/index.ts"],

@@ -132,7 +132,16 @@ export function parseStudioRoute(pathname: string, basePath?: string): ParsedStu
     return resolvePreviewRoute(segments.slice(1))
   }
   if (segments.length > 0) {
-    return resolvePreviewRoute(segments)
+    return {
+      mode: 'ide',
+      projectName: decodePathSegments(segments) || null,
+      serverName: null,
+      previewPath: undefined,
+      previewMode: undefined,
+      apiViewMode: undefined,
+      targetUrl: undefined,
+      basePath: normalizedBasePath,
+    }
   }
   return {
     mode: 'ide',
@@ -149,5 +158,5 @@ export function buildIdeRoutePath(projectName: string, basePath?: string): strin
   const normalizedBasePath = normalizeBasePath(basePath)
   const encodedProject = encodePathSegments(projectName)
   if (!encodedProject) return normalizedBasePath
-  return `${normalizedBasePath}${encodedProject}/bs`
+  return `${normalizedBasePath}${encodedProject}`
 }

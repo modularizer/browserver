@@ -173,13 +173,13 @@ interface TitleBarProps {
   onApplyTheme: (themeId: string) => void
   onCreateCheckpoint: () => void
   onOpenExportModal: () => void
+  onOpenDeleteProjectModal: () => void
   onExportDesktopProfile: () => void
   onOpenImportPicker: () => void
   onOpenCommandPalette: () => void
   onSetCommandQuery: (query: string) => void
   onApplyLayoutPreset: (presetId: keyof typeof layoutPresets) => void
   onOpenSettings: () => void
-  onDeleteCurrentProject: () => void
   onDeleteAllData: () => void
   onOpenWelcome: () => void
 }
@@ -191,13 +191,13 @@ function TitleBar({
   onApplyTheme,
   onCreateCheckpoint,
   onOpenExportModal,
+  onOpenDeleteProjectModal,
   onExportDesktopProfile,
   onOpenImportPicker,
   onOpenCommandPalette,
   onSetCommandQuery,
   onApplyLayoutPreset,
   onOpenSettings,
-  onDeleteCurrentProject,
   onDeleteAllData,
   onOpenWelcome,
 }: TitleBarProps) {
@@ -211,6 +211,7 @@ function TitleBar({
     { id: 'project.export', label: 'Export project', hint: 'Confirm first', run: onOpenExportModal },
     { id: 'project.export-desktop', label: 'Export desktop profile', hint: 'Electron launcher bundle', run: onExportDesktopProfile },
     { id: 'project.import', label: 'Import project', hint: 'JSON bundle', run: onOpenImportPicker },
+    { id: 'project.delete', label: 'Delete current project', hint: 'Confirm first', run: onOpenDeleteProjectModal },
   ]
 
   const viewMenu = [
@@ -223,7 +224,6 @@ function TitleBar({
 
   const accountMenu = [
     { id: 'account.settings', label: 'Settings', hint: 'Account & namespaces', run: () => openEditorView('namespace') },
-    { id: 'account.delete-project', label: 'Delete current project data', hint: 'Workspace + DB + trust', run: onDeleteCurrentProject },
     { id: 'account.delete-all', label: 'Delete ALL data', hint: 'Clears everything + reloads', run: onDeleteAllData },
   ]
 
@@ -321,6 +321,7 @@ export function App({ initialProjectId, onProjectRouteChange }: AppProps) {
   const externalDragDepthRef = useRef(0)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [exportModalOpen, setExportModalOpen] = useState(false)
+  const [deleteProjectConfirmOpen, setDeleteProjectConfirmOpen] = useState(false)
   const [deleteAllConfirmOpen, setDeleteAllConfirmOpen] = useState(false)
   const [welcomeForceOpen, setWelcomeForceOpen] = useState(false)
   const [renamingProject, setRenamingProject] = useState(false)
@@ -911,6 +912,13 @@ export function App({ initialProjectId, onProjectRouteChange }: AppProps) {
         keywords: ['upload load json'],
         run: openImportPicker,
       },
+      {
+        id: 'project.delete',
+        title: 'Delete current project',
+        subtitle: 'Remove workspace, data, trust, and local history for this project',
+        keywords: ['remove destroy workspace database trust history'],
+        run: () => setDeleteProjectConfirmOpen(true),
+      },
       ...(window.browserverDesktop?.isDesktop
         ? [{
             id: 'desktop.import-profile',
@@ -1433,13 +1441,13 @@ export function App({ initialProjectId, onProjectRouteChange }: AppProps) {
         onApplyTheme={applyThemeId}
         onCreateCheckpoint={() => void saveCheckpoint(`Checkpoint ${new Date().toLocaleTimeString()}`)}
         onOpenExportModal={() => setExportModalOpen(true)}
+        onOpenDeleteProjectModal={() => setDeleteProjectConfirmOpen(true)}
         onExportDesktopProfile={exportDesktopProfile}
         onOpenImportPicker={openImportPicker}
         onOpenCommandPalette={openCommandPalette}
         onSetCommandQuery={setCommandQuery}
         onApplyLayoutPreset={activatePreset}
         onOpenSettings={() => setSettingsOpen(true)}
-        onDeleteCurrentProject={() => void handleDeleteCurrentProject()}
         onDeleteAllData={() => setDeleteAllConfirmOpen(true)}
         onOpenWelcome={() => setWelcomeForceOpen(true)}
       />
@@ -1838,6 +1846,43 @@ export function App({ initialProjectId, onProjectRouteChange }: AppProps) {
             ) : null}
           </div>
         ) : null}
+      </Modal>
+      <Modal
+        open={deleteProjectConfirmOpen}
+        title="Delete Current Project"
+        onClose={() => setDeleteProjectConfirmOpen(false)}
+        actions={(
+          <>
+            <button
+              onClick={() => setDeleteProjectConfirmOpen(false)}
+              className="rounded bg-bs-bg-hover px-3 py-1 text-bs-text-muted hover:text-bs-text"
+            >
+              cancel
+            </button>
+            <button
+              onClick={() => {
+                setDeleteProjectConfirmOpen(false)
+                void handleDeleteCurrentProject()
+              }}
+              className="rounded bg-bs-error px-3 py-1 text-bs-accent-text"
+            >
+              delete project
+            </button>
+          </>
+        )}
+      >
+        <div className="space-y-2 text-[12px]">
+          <div className="font-medium text-bs-text">Delete {sample.name} from this browser?</div>
+          <div className="text-bs-text-muted">
+            This removes the current project's workspace files, local database, checkpoints, trust state, and local history.
+          </div>
+          <div className="text-bs-text-muted">
+            After deletion, browserver will switch back to the default sample so the workbench stays open.
+          </div>
+          <div className="rounded border border-bs-error/40 bg-bs-error/10 px-3 py-2 text-[11px] text-bs-error">
+            This cannot be undone.
+          </div>
+        </div>
       </Modal>
       <Modal
         open={deleteAllConfirmOpen}

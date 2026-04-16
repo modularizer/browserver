@@ -7,6 +7,8 @@ import { buildCssTargetUrl } from './clientTargetUrl'
 import { useIdentityStore } from '../store/identity'
 import { useNamespaceStore } from '../store/namespace'
 import { useWorkspaceStore } from '../store/workspace'
+import { buildRuntimeEnvBindings } from './runtimeEnv'
+import { collectWorkspaceDotEnv, createTsCompatAliases, mergeInjectedProcessEnv, rewriteTsCompatImports } from './tsCompatShims'
 import type {
   LocalRuntimeHandle,
 } from './types'
@@ -64,7 +66,7 @@ function isStaticAsset(path: string): boolean {
 
 export interface WorkspaceFileEntry {
   path: string
-  content: string
+  content: string | Uint8Array
 }
 
 /**
@@ -90,6 +92,13 @@ export async function startLocalTsRuntime(options: {
   serverName: string
   projectId?: string
   workspaceFiles?: WorkspaceFileEntry[]
+  /**
+   * Additional static files merged into __workspaceFiles on every sync.
+   * Used by the bundler runner to inject a just-built index.html that isn't
+   * in the workspace file list. Keys override workspace files of the same name.
+   */
+  extraStaticFiles?: Record<string, string | Uint8Array>
+  sourceEntryPoint?: string
   onRequest?: (direction: 'request' | 'response', payload: unknown) => void
 }): Promise<LocalRuntimeHandle> {
   if (useIdentityStore.getState().user && !options.serverName.trim().startsWith('dmz/')) {
@@ -114,7 +123,23 @@ export async function startLocalTsRuntime(options: {
 
   const staticExports = await resolveStaticExports()
   const staticAlias = createStaticAliasModuleUrl(staticExports)
-  const rewrittenSource = rewriteStaticImports(options.source, staticAlias.url)
+  const runtimeEnv = buildRuntimeEnvBindings({
+    projectId: options.projectId,
+    serverName: options.serverName,
+  })
+  const workspaceDotEnv = collectWorkspaceDotEnv(options.workspaceFiles ?? [], options.projectId)
+  const effectiveEnv = mergeInjectedProcessEnv(runtimeEnv, workspaceDotEnv)
+  const compatAliases = createTsCompatAliases({
+    workspaceDotEnv,
+    protectedEnvKeys: Object.keys(runtimeEnv),
+  })
+  const rewrittenSource = injectRuntimeEnvIntoTsSource(
+    rewriteTsCompatImports(
+      rewriteStaticImports(options.source, staticAlias.url),
+      compatAliases.specifierMap,
+    ),
+    effectiveEnv,
+  )
 
   // Inject workspace static files as a global so user code can reference __workspaceFiles.
   // We keep a single stable object and mutate it in place as workspace files change,
@@ -125,6 +150,7 @@ export async function startLocalTsRuntime(options: {
   const staticFiles: Record<string, string | Uint8Array> = {}
   ;(globalThis as any).__workspaceFiles = staticFiles
 
+  const extras = options.extraStaticFiles ?? {}
   const syncStaticFiles = (files: ReadonlyArray<{ path: string; content: string | Uint8Array }>) => {
     const nextKeys = new Set<string>()
     for (const file of files) {
@@ -132,6 +158,12 @@ export async function startLocalTsRuntime(options: {
       const key = toProjectRelativePath(file.path, options.projectId).replace(/^\/+|\/+$/g, '')
       nextKeys.add(key)
       staticFiles[key] = decodeIfDataUrl(file.content)
+    }
+    // Runner-supplied extras take precedence and are never pruned.
+    for (const [rawKey, value] of Object.entries(extras)) {
+      const key = rawKey.replace(/^\/+|\/+$/g, '')
+      nextKeys.add(key)
+      staticFiles[key] = value
     }
     for (const key of Object.keys(staticFiles)) {
       if (!nextKeys.has(key)) delete staticFiles[key]
@@ -233,6 +265,7 @@ export async function startLocalTsRuntime(options: {
         await (started as any).stop()
       }
       staticAlias.dispose()
+      compatAliases.dispose()
       delete (globalThis as any).__workspaceFiles
       debugLocalTsRuntime('stop.done', {
         serverName: resolvedServerName,
@@ -464,3 +497,47 @@ function rewriteStaticImports(source: string | Record<string, string>, staticAli
   if (typeof source === 'string') return replaceText(source)
   return Object.fromEntries(Object.entries(source).map(([path, content]) => [path, replaceText(content)]))
 }
+
+function injectRuntimeEnvIntoTsSource(
+  source: string | Record<string, string>,
+  env: Record<string, string>,
+): string | Record<string, string> {
+  const bootstrap = buildTsRuntimeEnvBootstrap(env)
+
+  if (typeof source === 'string') return `${bootstrap}\n${source}`
+
+  return Object.fromEntries(
+    Object.entries(source).map(([path, content]) => {
+      if (!/\.[cm]?[jt]sx?$/i.test(path)) return [path, content]
+      return [path, `${bootstrap}\n${content}`]
+    }),
+  )
+}
+
+function buildTsRuntimeEnvBootstrap(env: Record<string, string>): string {
+  return `
+(() => {
+  const __browserverEnv = ${JSON.stringify(env)}
+  const __browserverGlobal = globalThis as typeof globalThis & {
+    process?: { env?: Record<string, string | undefined> }
+  }
+  const __browserverProcess =
+    __browserverGlobal.process && typeof __browserverGlobal.process === 'object'
+      ? __browserverGlobal.process
+      : {}
+  const __browserverProcessEnv =
+    __browserverProcess.env && typeof __browserverProcess.env === 'object'
+      ? __browserverProcess.env
+      : {}
+  __browserverGlobal.process = {
+    ...__browserverProcess,
+    env: {
+      ...__browserverProcessEnv,
+      ...__browserverEnv,
+    },
+  }
+})()
+`.trim()
+}
+
+

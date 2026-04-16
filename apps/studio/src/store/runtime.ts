@@ -11,6 +11,7 @@ import { startPythonRuntime } from '../runtime/pythonRuntime'
 import { buildCssTargetUrl, normalizeClientApiBaseUrl, normalizeCssTargetUrl, parseCssServerName } from '../runtime/clientTargetUrl'
 import { extractOperationsFromOpenApi } from '../runtime/openapiOperations'
 import { invokeOpenApiClientOperation } from '../runtime/openapiInvoke'
+import { inferEntry, useScriptRunnerStore } from './scriptRunner'
 import type {
   RuntimeAnalysisSummary,
   LocalRuntimeHandle,
@@ -250,7 +251,42 @@ function runtimeBaseName(name: string): string {
 }
 
 function isServerFileName(name: string): boolean {
-  return /^server\.(ts|tsx|py)$/i.test(runtimeBaseName(name.trim()))
+  return /^server\.(ts|py)$/i.test(runtimeBaseName(name.trim()))
+}
+
+function isTsxFileName(name: string): boolean {
+  return /\.tsx$/i.test(runtimeBaseName(name.trim()))
+}
+
+function isPackageJsonFileName(name: string): boolean {
+  return /^package\.json$/i.test(runtimeBaseName(name.trim()))
+}
+
+export function getFileRunMode(name: string | null | undefined): 'hidden' | 'package-dev' | 'runtime' {
+  if (!name) return 'runtime'
+  if (isPackageJsonFileName(name)) return 'package-dev'
+  if (isTsxFileName(name)) return 'hidden'
+  return 'runtime'
+}
+
+function getWorkspaceBundlerFiles() {
+  return useWorkspaceStore.getState().files
+    .filter((file) => typeof file.content === 'string')
+    .map((file) => ({
+      path: file.path.startsWith('/') ? file.path : `/${file.path}`,
+      contents: file.content as string,
+    }))
+}
+
+function getPackageDevScriptCommand(content: unknown): string | null {
+  if (typeof content !== 'string') return null
+  try {
+    const parsed = JSON.parse(content) as { scripts?: Record<string, unknown> }
+    const command = parsed?.scripts?.dev
+    return typeof command === 'string' && command.trim() ? command : null
+  } catch {
+    return null
+  }
 }
 
 function getPaneActivePath(pane: EditorPaneId): string | null {
@@ -682,6 +718,44 @@ export const useRuntimeStore = create<RuntimeState>()((set, get) => ({
 
     syncVisibleRuntimeFromPane(set, get, pane)
 
+    if (isPackageJsonFileName(targetFile.name)) {
+      const command = getPackageDevScriptCommand(targetFile.content)
+      if (!command) {
+        updateTabSession(set, get, targetFile.path, {
+          mode: 'idle',
+          status: 'error',
+          errorMessage: 'package.json is missing a dev script',
+        })
+        set({
+          logs: [
+            logEntry('error', `No dev script found in ${targetFile.name}`),
+            ...get().logs,
+          ],
+        })
+        return
+      }
+
+      const files = getWorkspaceBundlerFiles()
+      useWorkspaceStore.getState().setActiveBottomPanel?.('build')
+      await useScriptRunnerStore.getState().runScript({ name: 'dev', command, kind: 'dev' }, files, inferEntry(files))
+      return
+    }
+
+    if (isTsxFileName(targetFile.name)) {
+      updateTabSession(set, get, targetFile.path, {
+        mode: 'idle',
+        status: 'error',
+        errorMessage: 'Run the app from package.json instead of an individual .tsx file',
+      })
+      set({
+        logs: [
+          logEntry('error', `Run ${targetFile.name} via package.json (dev script)`),
+          ...get().logs,
+        ],
+      })
+      return
+    }
+
     if (isServerFileName(targetFile.name)) {
       updateTabSession(set, get, targetFile.path, {
         mode: 'server',
@@ -719,20 +793,42 @@ export const useRuntimeStore = create<RuntimeState>()((set, get) => ({
           runtimeHandles.delete(targetFile.path)
         }
 
-        const handle = workspace.sample.serverLanguage === 'typescript'
-          ? await startLocalTsRuntime({
-              source: normalizeLegacyPlatClientImports(targetFile.content),
-              serverName: desiredServerName,
-              projectId: workspace.sample.id,
-              workspaceFiles: workspace.files.map(f => ({ path: f.path, content: f.content })),
-              onRequest: (direction, payload) => {
-                recordRuntimeTelemetry(set, get, targetFile.path, pane, direction, payload)
-              },
-            })
-          : await startPythonRuntime({
-              source: targetFile.content,
-              serverName: desiredServerName,
-            })
+        let handle;
+        if (workspace.sample.serverLanguage === 'typescript') {
+          // Multi-file support: gather all .ts/.tsx files in the sample directory
+          const sampleDir = workspace.sample.id.replace(/^dmz\//, '')
+          const tsFiles = workspace.files.filter(f =>
+            typeof f.content === 'string' &&
+            (f.name.endsWith('.ts') || f.name.endsWith('.tsx')) &&
+            f.path.startsWith(`/samples/${sampleDir}/`)
+          )
+          let source: Record<string, string>;
+          if (tsFiles.length > 1) {
+            // Multi-file: map relative file names to contents
+            source = Object.fromEntries(tsFiles.map(f => [f.name, normalizeLegacyPlatClientImports(String(f.content))]))
+          } else {
+            // Single file fallback
+            source = { [targetFile.name]: normalizeLegacyPlatClientImports(String(targetFile.content)) }
+          }
+          handle = await startLocalTsRuntime({
+            source,
+            serverName: desiredServerName,
+            projectId: workspace.sample.id,
+            workspaceFiles: workspace.files.map(f => ({ path: f.path, content: f.content })),
+            sourceEntryPoint: targetFile.name,
+            onRequest: (direction, payload) => {
+              recordRuntimeTelemetry(set, get, targetFile.path, pane, direction, payload)
+            },
+          })
+        } else {
+          handle = await startPythonRuntime({
+            source: String(targetFile.content),
+            serverName: desiredServerName,
+            projectId: workspace.sample.id,
+            workspaceFiles: workspace.files.map((f) => ({ path: f.path, content: f.content })),
+            entryFilePath: targetFile.path,
+          })
+        }
         runtimeHandles.set(targetFile.path, { pane, handle })
         playgroundClient = null
 
@@ -869,8 +965,11 @@ export const useRuntimeStore = create<RuntimeState>()((set, get) => ({
       const startedAt = Date.now()
       const targetUrl = getDefaultClientTarget(get())
       const result = await runClientSource({
-        source: targetFile.content,
+        source: String(targetFile.content),
         targetUrl,
+        projectId: workspace.sample.id,
+        serverName: availableHandle.serverName,
+        workspaceFiles: workspace.files.map((f) => ({ path: f.path, content: f.content })),
       })
       const endedAt = Date.now()
       const nextRecentClientTargets = [targetUrl, ...get().recentClientTargets.filter((entry) => entry !== targetUrl)].slice(0, 8)

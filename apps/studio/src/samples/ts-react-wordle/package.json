@@ -1,0 +1,17 @@
+{
+  "name": "browserver-wordle",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "scripts": {
+    "build": "browserver-bundler build",
+    "dev": "browserver-bundler dev"
+  },
+  "browserver": {
+    "kind": "frontend",
+    "entry": "index.tsx"
+  }
+}

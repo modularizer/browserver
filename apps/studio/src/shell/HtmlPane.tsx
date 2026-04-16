@@ -156,7 +156,31 @@ function buildHtmlPreviewDocument(
   const doctype = /^\s*<!doctype/i.test(content) ? '<!DOCTYPE html>\n' : ''
   const baseTag = currentFolder ? `<base href="${escapeHtmlAttribute(`/${currentFolder}/`)}">` : '<base href="/">'
 
-  return injectIntoHead(`${doctype}${serialized}`, baseTag)
+  // Inject error overlay script for better error visibility
+  const errorOverlayScript = `
+    <script>
+      window.onerror = function (msg, url, line, col, error) {
+        var pre = document.createElement('pre');
+        pre.style.cssText = 'color:red;background:#fff;padding:1em;white-space:pre-wrap;z-index:99999;position:fixed;top:0;left:0;right:0;max-height:100vh;overflow:auto;font-size:14px;';
+        pre.textContent = 'Error: ' + msg + '\n' +
+          (url ? 'File: ' + url + '\n' : '') +
+          (line ? 'Line: ' + line + '\n' : '') +
+          (error && error.stack ? error.stack : '');
+        document.body.innerHTML = '';
+        document.body.appendChild(pre);
+        return false;
+      };
+      window.onunhandledrejection = function (e) {
+        var pre = document.createElement('pre');
+        pre.style.cssText = 'color:red;background:#fff;padding:1em;white-space:pre-wrap;z-index:99999;position:fixed;top:0;left:0;right:0;max-height:100vh;overflow:auto;font-size:14px;';
+        pre.textContent = 'Unhandled Promise Rejection: ' + (e.reason && e.reason.stack ? e.reason.stack : e.reason);
+        document.body.innerHTML = '';
+        document.body.appendChild(pre);
+      };
+    </script>
+  `;
+
+  return injectIntoHead(`${doctype}${serialized}`, baseTag + errorOverlayScript)
 }
 
 function rewriteElementUrlAttribute(

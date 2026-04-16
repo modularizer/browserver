@@ -4,29 +4,14 @@ import { App } from './App'
 import { SiteViewer } from './SiteViewer'
 import { samples } from './samples'
 import { ACTIVE_WORKSPACE_KEY } from './store/workspace'
-import { parseStudioRoute } from './routing/studioRoute'
+import { buildIdeRoutePath, parseStudioRoute } from './routing/studioRoute'
 import { installCssServiceWorker } from './runtime/cssServiceWorker'
 import './index.css'
 
 void installCssServiceWorker().catch((err) => {
   console.error('[browserver] Failed to install css service worker', err)
 })
-function buildIdeRoutePath(projectId: string, basePath?: string): string {
-  const normalizedBasePath = (() => {
-    const candidate = (basePath ?? '/').trim() || '/'
-    if (candidate === '/') return '/'
-    return `/${candidate.replace(/^\/+|\/+$/g, '')}/`
-  })()
-  const encodedProject = projectId
-    .trim()
-    .replace(/^\/+|\/+$/g, '')
-    .split('/')
-    .filter(Boolean)
-    .map((segment) => encodeURIComponent(segment))
-    .join('/')
-  if (!encodedProject) return normalizedBasePath
-  return `${normalizedBasePath}${encodedProject}/bs`
-}
+
 function Root() {
   const [pathname, setPathname] = React.useState(() => window.location.pathname)
   React.useEffect(() => {
@@ -46,6 +31,13 @@ function Root() {
     setPathname(window.location.pathname)
   }, [])
   const route = parseStudioRoute(pathname, import.meta.env.BASE_URL)
+  React.useEffect(() => {
+    if (route.mode !== 'ide' || !route.projectName) return
+    const canonicalPath = buildIdeRoutePath(route.projectName, import.meta.env.BASE_URL)
+    if (window.location.pathname === canonicalPath) return
+    window.history.replaceState(null, '', `${canonicalPath}${window.location.search}${window.location.hash}`)
+    setPathname(window.location.pathname)
+  }, [route.mode, route.projectName])
   React.useEffect(() => {
     if (route.mode !== 'ide' || route.projectName) return
     const redirectProjectId = window.localStorage.getItem(ACTIVE_WORKSPACE_KEY) ?? samples[0]?.id

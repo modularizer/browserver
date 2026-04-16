@@ -11,6 +11,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
+    "@browserver/bundler": "0.0.0",
     "@browserver/core": "0.0.0",
     "@browserver/database": "0.0.0",
     "@browserver/runtime": "0.0.0",

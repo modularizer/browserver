@@ -35,6 +35,8 @@ function getLanguageFromExtension(filename: string): StudioFileLanguage {
   const ext = filename.split('.').pop()?.toLowerCase()
   switch (ext) {
     case 'ts': return 'typescript'
+    case 'tsx': return 'typescript'
+    case 'jsx': return 'javascript'
     case 'js': return 'javascript'
     case 'py': return 'python'
     case 'json': return 'json'
@@ -74,16 +76,18 @@ const sampleDirs = [
   'ts-hello',
   'ts-math',
   'ts-static-site',
+  'ts-react',
+  'ts-react-wordle',
   'py-hello',
 ]
 
 // Text files → ?raw so we get the original source, NOT Vite's transformed
 // module output (which would rewrite imports to /@fs/... and append a
 // sourceMappingURL).  Binary files → ?url so we can fetch() as a blob.
-const textSampleFiles = import.meta.glob('./{ts-hello,ts-math,ts-static-site,py-hello}/*', {
+const textSampleFiles = import.meta.glob('./{ts-hello,ts-math,ts-static-site,ts-react,ts-react-wordle,py-hello}/*', {
   query: '?raw', import: 'default', eager: true,
 }) as Record<string, string>
-const binarySampleFiles = import.meta.glob('./{ts-hello,ts-math,ts-static-site,py-hello}/*', {
+const binarySampleFiles = import.meta.glob('./{ts-hello,ts-math,ts-static-site,ts-react,ts-react-wordle,py-hello}/*', {
   query: '?url', import: 'default', eager: true,
 }) as Record<string, string>
 
@@ -117,6 +121,16 @@ const sampleMeta: Record<string, { name: string, description: string, serverLang
     description: 'Serve HTML, CSS, and other static files from a client-side server.',
     serverLanguage: 'typescript',
   },
+  'ts-react': {
+    name: 'React + Tailwind (Frontend)',
+    description: 'Frontend React app bundled in-browser with the browserver bundler.',
+    serverLanguage: 'typescript',
+  },
+  'ts-react-wordle': {
+    name: 'Wordle (React Game)',
+    description: 'Playable Wordle clone: React UI + api.ts game layer + persisted stats.',
+    serverLanguage: 'typescript',
+  },
   'py-hello': {
     name: 'Hello (Python)',
     description: 'Minimal greeting server in Python.',
@@ -124,8 +138,9 @@ const sampleMeta: Record<string, { name: string, description: string, serverLang
   },
 }
 
-// Build the samples array programmatically
-export const samples: Sample[] = []
+// Build the samples array programmatically (populated at module load below)
+// eslint-disable-next-line prefer-const
+let samplesArray: Sample[] = []
 
 // Group files by sample dir
 const filesBySample: Record<string, { name: string, path: string }[]> = {}
@@ -161,4 +176,6 @@ const samplePromises = Object.entries(filesBySample).map(async ([sampleDir, file
 
 export const samplesPromise: Promise<Sample[]> = Promise.all(samplePromises).then(arr => arr.filter(Boolean) as Sample[])
 
-// samplesPromise is now the async source of truth for all samples
+// Top-level await resolves samples before any consumer imports it.
+samplesArray = await samplesPromise
+export const samples: Sample[] = samplesArray

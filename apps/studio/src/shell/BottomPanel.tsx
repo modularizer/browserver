@@ -1,5 +1,8 @@
+import { useState } from 'react'
 import { selectRuntimeIsStale, useRuntimeStore } from '../store/runtime'
 import { useDatabaseStore } from '../store/database'
+import { useServerDatabaseStore } from '../store/serverDatabase'
+import { BuildPanel } from './BuildPanel'
 import { HistoryPanel } from './HistoryPanel'
 import { NamespaceDashboard } from './NamespaceDashboard'
 import { TrustPanel } from './TrustPanel'
@@ -63,15 +66,26 @@ export function BottomPanel({ onCreateCheckpoint, collapsed = false, onRestore, 
   const launchable = useRuntimeStore((state) => state.launchable)
   const launchNote = useRuntimeStore((state) => state.launchNote)
   const runtimeIsStale = useRuntimeStore(selectRuntimeIsStale)
-  const tables = useDatabaseStore((state) => state.tables)
-  const activeTableName = useDatabaseStore((state) => state.activeTableName)
+  const localTables = useDatabaseStore((state) => state.tables)
+  const localActiveTableName = useDatabaseStore((state) => state.activeTableName)
   const databaseSaveState = useDatabaseStore((state) => state.saveState)
   const filter = useDatabaseStore((state) => state.filter)
   const setFilter = useDatabaseStore((state) => state.setFilter)
-  const setActiveTable = useDatabaseStore((state) => state.setActiveTable)
+  const setLocalActiveTable = useDatabaseStore((state) => state.setActiveTable)
   const updateCell = useDatabaseStore((state) => state.updateCell)
   const insertRow = useDatabaseStore((state) => state.insertRow)
   const deleteRow = useDatabaseStore((state) => state.deleteRow)
+  const serverTables = useServerDatabaseStore((state) => state.tables)
+  const serverActiveTableName = useServerDatabaseStore((state) => state.activeTableName)
+  const setServerActiveTable = useServerDatabaseStore((state) => state.setActiveTable)
+  const serverConnectedName = useServerDatabaseStore((state) => state.connectedServerName)
+  const serverError = useServerDatabaseStore((state) => state.error)
+  const refreshServerTables = useServerDatabaseStore((state) => state.refresh)
+  const [dataSource, setDataSource] = useState<'local' | 'server'>('local')
+  const isServer = dataSource === 'server'
+  const tables = isServer ? serverTables : localTables
+  const activeTableName = isServer ? serverActiveTableName : localActiveTableName
+  const setActiveTable = isServer ? setServerActiveTable : setLocalActiveTable
   const activeTab = tabs.find((tab) => tab.id === active) ?? tabs[0]
   const activeTable = tables.find((table) => table.name === activeTableName) ?? tables[0] ?? null
   const filteredRows = activeTable
@@ -258,8 +272,23 @@ export function BottomPanel({ onCreateCheckpoint, collapsed = false, onRestore, 
         {activeTab.id === 'data' ? (
           <div className="flex h-full min-h-0 gap-2">
             <div className="flex w-52 flex-none flex-col gap-1 overflow-auto rounded border border-bs-border bg-bs-bg-sidebar p-2">
+              <div className="flex items-center gap-1">
+                <button
+                  onClick={() => setDataSource('local')}
+                  className={`flex-1 rounded px-2 py-0.5 text-[10px] ${dataSource === 'local' ? 'bg-bs-bg-active text-bs-text' : 'text-bs-text-faint hover:text-bs-text'}`}
+                >local</button>
+                <button
+                  onClick={() => setDataSource('server')}
+                  className={`flex-1 rounded px-2 py-0.5 text-[10px] ${dataSource === 'server' ? 'bg-bs-bg-active text-bs-text' : 'text-bs-text-faint hover:text-bs-text'}`}
+                >server</button>
+              </div>
               <div className="text-bs-text">tables</div>
-              <div className="text-[10px] text-bs-text-faint">storage: {databaseSaveState}</div>
+              <div className="text-[10px] text-bs-text-faint">
+                {isServer
+                  ? (serverConnectedName ? `live: ${serverConnectedName}` : 'server not running')
+                  : `storage: ${databaseSaveState}`}
+              </div>
+              {isServer && serverError ? <div className="text-[10px] text-bs-error">{serverError}</div> : null}
               {tables.length > 0 ? tables.map((table) => (
                 <button
                   key={table.name}
@@ -287,12 +316,20 @@ export function BottomPanel({ onCreateCheckpoint, collapsed = false, onRestore, 
                   placeholder="filter rows"
                   className="min-w-0 flex-1 rounded border border-bs-border bg-bs-bg-panel px-2 py-1 text-[10px] text-bs-text outline-none focus:border-bs-border-focus"
                 />
-                {activeTable ? (
+                {activeTable && !isServer ? (
                   <button
                     onClick={() => insertRow(activeTable.name)}
                     className="rounded bg-bs-bg-hover px-2 py-0.5 text-bs-text hover:bg-bs-bg-active"
                   >
                     add row
+                  </button>
+                ) : null}
+                {isServer ? (
+                  <button
+                    onClick={() => void refreshServerTables()}
+                    className="rounded bg-bs-bg-hover px-2 py-0.5 text-bs-text hover:bg-bs-bg-active"
+                  >
+                    refresh
                   </button>
                 ) : null}
               </div>
@@ -317,18 +354,26 @@ export function BottomPanel({ onCreateCheckpoint, collapsed = false, onRestore, 
                             <td key={column.name} className="px-2 py-1 align-top">
                               <input
                                 value={String(row.values[column.name] ?? '')}
-                                onChange={(event) => updateCell(activeTable.name, row.id, column.name, event.target.value)}
-                                className="w-full rounded border border-transparent bg-bs-bg-panel px-1 py-1 text-bs-text outline-none focus:border-bs-border-focus"
+                                readOnly={isServer}
+                                onChange={(event) => {
+                                  if (isServer) return
+                                  updateCell(activeTable.name, row.id, column.name, event.target.value)
+                                }}
+                                className={`w-full rounded border border-transparent px-1 py-1 text-bs-text outline-none focus:border-bs-border-focus ${isServer ? 'bg-bs-bg-sidebar text-bs-text-muted' : 'bg-bs-bg-panel'}`}
                               />
                             </td>
                           ))}
                           <td className="px-2 py-1 align-top">
-                            <button
-                              onClick={() => deleteRow(activeTable.name, row.id)}
-                              className="rounded bg-bs-bg-hover px-2 py-0.5 text-bs-text-faint hover:text-bs-text"
-                            >
-                              delete
-                            </button>
+                            {isServer ? (
+                              <span className="text-bs-text-faint">read-only</span>
+                            ) : (
+                              <button
+                                onClick={() => deleteRow(activeTable.name, row.id)}
+                                className="rounded bg-bs-bg-hover px-2 py-0.5 text-bs-text-faint hover:text-bs-text"
+                              >
+                                delete
+                              </button>
+                            )}
                           </td>
                         </tr>
                       ))}
@@ -352,7 +397,8 @@ export function BottomPanel({ onCreateCheckpoint, collapsed = false, onRestore, 
         {activeTab.id === 'history' ? <HistoryPanel onCreateCheckpoint={onCreateCheckpoint} /> : null}
 
         {activeTab.id === 'build' ? (
-          <div className="flex flex-col gap-2">
+          <div className="flex h-full flex-col gap-2">
+            <BuildPanel />
             <div className="rounded border border-bs-border bg-bs-bg-sidebar px-2 py-1">
               <div className="text-bs-text">runtime: {runtimeLanguage ?? 'unknown'} / {runtimeStatus}</div>
               <div className="text-bs-text-faint">

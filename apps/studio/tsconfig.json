@@ -4,5 +4,10 @@
     "types": ["vite/client"]
   },
   "include": ["src"],
-  "exclude": ["src/samples/*/server.ts", "src/samples/*/client.ts", "src/samples/*/server.py"]
+  "exclude": [
+    "src/samples/*/server.ts",
+    "src/samples/*/client.ts",
+    "src/samples/*/server.py",
+    "src/samples/ts-react/**"
+  ]
 }

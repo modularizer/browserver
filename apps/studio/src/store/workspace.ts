@@ -123,6 +123,7 @@ interface WorkspaceState {
   renameProject: (name: string) => void
   renameProjectSlug: (slug: string) => void
   updateFileContent: (path: string, content: string) => void
+  applyRuntimeFilesystemSnapshot: (files: Array<{ path: string; content: string | Uint8Array }>) => void
   saveFile: (path: string, message?: string) => Promise<void>
 }
 
@@ -311,6 +312,32 @@ function languageFromFileName(name: string): StoredWorkspaceFile['language'] {
   if (lower.endsWith('.py')) return 'python'
   if (lower.endsWith('.yml') || lower.endsWith('.yaml')) return 'yaml'
   return 'plaintext'
+}
+
+function sameFileContent(a: string | Uint8Array, b: string | Uint8Array): boolean {
+  if (typeof a === 'string' || typeof b === 'string') {
+    return a === b
+  }
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false
+  }
+  return true
+}
+
+function sameWorkspaceFiles(
+  current: WorkspaceFile[],
+  next: Array<{ path: string; content: string | Uint8Array }>,
+): boolean {
+  if (current.length !== next.length) return false
+  for (let i = 0; i < current.length; i++) {
+    const left = current[i]
+    const right = next[i]
+    if (!right) return false
+    if (left.path !== right.path) return false
+    if (!sameFileContent(left.content, right.content)) return false
+  }
+  return true
 }
 
 function isUniqueFileName(files: WorkspaceFile[], currentPath: string, nextName: string): boolean {
@@ -1197,7 +1224,7 @@ export const useWorkspaceStore = create<WorkspaceState>()((set, get) => ({
     tertiary: { tabs: [], activePath: null },
   },
   paneFiles: {
-    primary: null,
+    primary: '',
     secondary: null,
     tertiary: null,
   },
@@ -2215,6 +2242,64 @@ export const useWorkspaceStore = create<WorkspaceState>()((set, get) => ({
       }
     })
   },
+  applyRuntimeFilesystemSnapshot: (runtimeFiles) => {
+    const state = get()
+    const normalized = [...runtimeFiles]
+      .map((file) => ({
+        path: file.path.startsWith('/') ? file.path : `/${file.path}`,
+        content: file.content,
+      }))
+      .sort((a, b) => a.path.localeCompare(b.path))
+
+    if (sameWorkspaceFiles(state.files, normalized)) return
+
+    const now = Date.now()
+    const files: WorkspaceFile[] = normalized.map((file) => ({
+      path: file.path,
+      name: fileNameFromPath(file.path),
+      language: languageFromFileName(fileNameFromPath(file.path)),
+      content: file.content,
+      updatedAt: now,
+    }))
+
+    const sample = {
+      ...state.sample,
+      files: files.map((file) => ({
+        name: file.name,
+        language: file.language,
+        content: file.content,
+      }) satisfies SampleFile),
+    }
+
+    const nextSession = normalizeEditorSession(
+      files,
+      buildEditorSessionSnapshot(state),
+    )
+
+    const nextState = {
+      ...state,
+      sample,
+      files,
+      openFilePaths: nextSession.openFilePaths,
+      paneTabs: nextSession.paneTabs ?? state.paneTabs,
+      paneFiles: nextSession.paneFiles,
+      activeEditorPane: nextSession.activeEditorPane,
+      activeFilePath: nextSession.activeFilePath,
+      activeBottomPanel: nextSession.activeBottomPanel,
+      activeRightPanelTab: nextSession.activeRightPanelTab,
+      viewTitles: nextSession.viewTitles ?? state.viewTitles,
+      renamingPath: null,
+      renamingFolderPath: null,
+      saveState: 'saving' as const,
+      saveError: null,
+    }
+
+    set(nextState)
+    persistWorkspaceUiState(state.sample.id, nextSession)
+    queueSave(currentSnapshot(nextState), () => {
+      set((latest) => ({ saveState: latest.saveState === 'saved' ? 'saved' : 'idle' }))
+    })
+  },
   saveFile: async (path: string, message?: string) => {
     const state = get()
     const file = state.files.find(f => f.path === path)
@@ -2226,7 +2311,7 @@ export const useWorkspaceStore = create<WorkspaceState>()((set, get) => ({
 
     if (file.name.endsWith('.browserver.yaml')) {
       try {
-        const config = parseBrowserYaml(file.content)
+        const config = parseBrowserYaml(String(file.content))
         if (!config.theme || typeof config.layout?.sidebarWidth !== 'number') {
           throw new Error('Invalid .browserver.yaml format')
         }

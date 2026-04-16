@@ -4,7 +4,7 @@ import { evaluateServerAuthorityStatus } from '../runtime/authorityPolicy'
 import { preferredServerNameForProject } from '../runtime/serverNames'
 import { useIdentityStore } from '../store/identity'
 import { useNamespaceStore } from '../store/namespace'
-import { selectTabRuntimeSession, useRuntimeStore } from '../store/runtime'
+import { getFileRunMode, selectTabRuntimeSession, useRuntimeStore } from '../store/runtime'
 import {
   editorViewDefinitions,
   getEditorItemLabels,
@@ -76,7 +76,8 @@ export function TabBar({
   const launchAuthorityStatus = activeFile?.name.split('/').pop()?.startsWith('server')
     ? evaluateServerAuthorityStatus(preferredServerNameForProject(sampleId, activeEditorPane), user, namespaces)
     : null
-  const canRunActive = isRunning || !launchAuthorityStatus || launchAuthorityStatus.allowed
+  const runMode = getFileRunMode(activeFile?.name)
+  const canRunActive = runMode !== 'hidden' && (isRunning || !launchAuthorityStatus || launchAuthorityStatus.allowed)
   const unopenedFiles = files
     .filter((file) => !openFilePaths.includes(file.path))
     .map((file) => ({
@@ -380,7 +381,7 @@ export function TabBar({
         </div>
       </div>
       <div className="flex h-full flex-none items-center gap-2 border-l border-bs-border bg-bs-tab-inactive px-2">
-        {!activeIsView ? (
+        {!activeIsView && runMode !== 'hidden' ? (
           <>
             <span className="text-[9px] uppercase leading-none tracking-wide text-bs-text-faint">
               {activePaneRuntime.status}
@@ -392,7 +393,13 @@ export function TabBar({
                 isRunning ? 'bg-bs-error text-bs-accent-text' : 'bg-bs-good text-bs-accent-text'
               } disabled:cursor-not-allowed disabled:opacity-50`}
               aria-label={isRunning ? 'Stop current pane' : 'Run current pane'}
-              title={isRunning ? 'Stop the current pane runtime' : launchAuthorityStatus?.reason ?? 'Run the current pane file'}
+              title={
+                isRunning
+                  ? 'Stop the current pane runtime'
+                  : runMode === 'package-dev'
+                    ? 'Run npm run dev for this package'
+                    : launchAuthorityStatus?.reason ?? 'Run the current pane file'
+              }
             >
               {isRunning ? '■' : '▶'}
             </button>

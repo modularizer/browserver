@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useRuntimeStore, type ServerEntry } from '../store/runtime'
 import { useWorkspaceStore } from '../store/workspace'
+import { useNamespaceStore } from '../store/namespace'
+import { preferredServerNameForProject } from '../runtime/serverNames'
 
 interface ClientTargetFieldProps {
   className?: string
@@ -67,13 +69,22 @@ export function ClientTargetField({ className = '' }: ClientTargetFieldProps) {
       .slice(0, 12)
   }, [connectionUrl, discoveredServers, files, localServers, serverName])
 
+  const sample = useWorkspaceStore((state) => state.sample)
+  const namespaces = useNamespaceStore((state) => state.namespaces)
   const bestSuggestion = useMemo(() => {
+    // Use preferredServerNameForProject to get the best namespace/project-based suggestion
+    if (sample?.id) {
+      const preferred = preferredServerNameForProject(sample.id, 'primary')
+      if (preferred) {
+        return `css://${preferred}`
+      }
+    }
     return connectionUrl
       ?? (serverName ? `css://${serverName}` : null)
       ?? recentClientTargets[0]
       ?? inferredTargets[0]
       ?? ''
-  }, [connectionUrl, inferredTargets, recentClientTargets, serverName])
+  }, [connectionUrl, inferredTargets, recentClientTargets, serverName, sample])
 
   useEffect(() => {
     if (!open) return
