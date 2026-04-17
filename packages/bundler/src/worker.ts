@@ -26,18 +26,29 @@ function vfsPlugin(files: BundlerFile[]): esbuild.Plugin {
     name: 'browserver-vfs',
     setup(build) {
       build.onResolve({ filter: /.*/ }, (args) => {
+        // Special-case: rewrite JSX runtime imports for React 17+
+        if (args.path === 'react/jsx-runtime') {
+          return { path: 'https://esm.sh/react@18/jsx-runtime', namespace: 'cdn', external: false }
+        }
+        if (args.path === 'react/jsx-dev-runtime') {
+          return { path: 'https://esm.sh/react@18/jsx-dev-runtime', namespace: 'cdn', external: false }
+        }
         // Entry / absolute VFS path
         if (args.kind === 'entry-point') {
           return { path: normalize(args.path), namespace: 'vfs' }
         }
-        // Special-case: rewrite bare imports for React/ReactDOM to UMD-compatible CDN URLs
+        // Special-case: rewrite bare imports for React/ReactDOM to ESM-compatible CDN URLs
         if (args.path === 'react') {
-          // Use UMD build from unpkg
-          return { path: 'https://unpkg.com/react@18/umd/react.development.js', namespace: 'cdn', external: false }
+          // Use ESM build from esm.sh
+          return { path: 'https://esm.sh/react@18', namespace: 'cdn', external: false }
         }
-        if (args.path === 'react-dom' || args.path === 'react-dom/client') {
-          // Use UMD build from unpkg (react-dom/client is not a separate UMD, so use react-dom)
-          return { path: 'https://unpkg.com/react-dom@18/umd/react-dom.development.js', namespace: 'cdn', external: false }
+        if (args.path === 'react-dom') {
+          // Use ESM build from esm.sh
+          return { path: 'https://esm.sh/react-dom@18', namespace: 'cdn', external: false }
+        }
+        if (args.path === 'react-dom/client') {
+          // Use ESM build from esm.sh for react-dom/client
+          return { path: 'https://esm.sh/react-dom@18/client', namespace: 'cdn', external: false }
         }
         // Imports inside a CDN module
         if (args.namespace === 'cdn') {
@@ -156,7 +167,7 @@ async function handleBuild(req: BuildRequest): Promise<WorkerResponse> {
       logLevel: 'silent',
       platform: 'browser',
       entryNames: 'main',
-      external: ['react', 'react-dom'],
+      // external: ['react', 'react-dom'], // Do not mark as external, so esm.sh ESM React is bundled
       globalName: (req.format ?? 'esm') === 'iife' ? (req.globalName ?? '__browserverPreview') : undefined,
       banner: {
         js: '',

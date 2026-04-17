@@ -171,22 +171,18 @@ export async function startLocalTsRuntime(options: {
     return nextKeys
   }
 
-  if (options.workspaceFiles) {
-    const keys = syncStaticFiles(options.workspaceFiles)
-    debugLocalTsRuntime('workspace-files.injected', {
-      serverName: options.serverName,
-      staticFileCount: keys.size,
-      staticFileKeysPreview: Array.from(keys).slice(0, 30),
-      hasIndexHtml: keys.has('index.html'),
-    })
-  } else {
-    debugLocalTsRuntime('workspace-files.injected', {
-      serverName: options.serverName,
-      staticFileCount: 0,
-      staticFileKeysPreview: [],
-      hasIndexHtml: false,
-    })
-  }
+  // Seed the static files dict on boot: the subscription below only fires on
+  // change events, so without this the first request races ahead of any
+  // workspace update and the runner-supplied extras (e.g. a just-built
+  // index.html) aren't visible — the server 404s `/` until the user types.
+  const initialFiles = options.workspaceFiles ?? useWorkspaceStore.getState().files
+  const initialKeys = syncStaticFiles(initialFiles)
+  debugLocalTsRuntime('workspace-files.injected', {
+    serverName: options.serverName,
+    staticFileCount: initialKeys.size,
+    staticFileKeysPreview: Array.from(initialKeys).slice(0, 30),
+    hasIndexHtml: initialKeys.has('index.html'),
+  })
 
   // Live updates: when the workspace file list changes, mirror it into the same
   // staticFiles object so the running server picks up edits without a restart.

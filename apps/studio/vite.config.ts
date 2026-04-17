@@ -20,6 +20,7 @@ export default defineConfig(({ mode }) => ({
       '@browserver/runtime': path.resolve(__dirname, '../../packages/runtime/src/index.ts'),
       '@browserver/storage': path.resolve(__dirname, '../../packages/storage/src/index.ts'),
     },
+    dedupe: ['react', 'react-dom'],
   },
   build: {
     target: 'es2022',

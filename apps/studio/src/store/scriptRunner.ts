@@ -51,8 +51,6 @@ function buildHtml(js: string, serverName: string): string {
 <head>
   <meta charset="utf-8" />
   <script src="https://cdn.tailwindcss.com"></script>
-  <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
-  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
   <style>html,body{margin:0;min-height:100%;background:#0b1020;color:#e2e8f0;font-family:ui-sans-serif,system-ui}</style>
 </head>
 <body>
