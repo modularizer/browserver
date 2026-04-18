@@ -1,6 +1,10 @@
 import { create } from 'zustand'
 import { Bundler, type BundlerFile } from '@browserver/bundler'
 import BundlerWorker from '../../../../packages/bundler/src/worker.ts?worker'
+import {
+  files as platClientFiles,
+  aliases as platClientAliases,
+} from 'virtual:plat-client-bundle'
 import { useWorkspaceStore } from './workspace'
 import { useIdentityStore } from './identity'
 import { useNamespaceStore } from './namespace'
@@ -17,9 +21,24 @@ export type RunnerPhase = 'idle' | 'initializing' | 'building' | 'serving' | 'ok
 
 export type ScriptKind = 'build' | 'dev' | 'start' | 'unknown'
 
+export type ServerLogLevel = 'log' | 'info' | 'warn' | 'error' | 'debug'
+export interface ServerLogEntry {
+  ts: number
+  level: ServerLogLevel
+  text: string
+}
+
+const MAX_SERVER_LOGS = 500
+
 export interface ScriptRunnerState {
   phase: RunnerPhase
   scriptName: string | null
+  /**
+   * Workspace path (typically a package.json) that owns the current run.
+   * Used by the runtime store to mirror phase → tab-session status so the
+   * favicon, runtime pill, and .browserver.yaml autorestart stay in sync.
+   */
+  ownerPath: string | null
   message: string
   errors: string[]
   serverName: string | null
@@ -28,7 +47,10 @@ export interface ScriptRunnerState {
   devWatching: boolean
   lastBuiltAt: number | null
   durationMs: number
-  runScript: (script: { name: string; command: string; kind: ScriptKind }, files: BundlerFile[], entry: string | null) => Promise<void>
+  serverLogs: ServerLogEntry[]
+  appendServerLog: (level: ServerLogLevel, text: string) => void
+  clearServerLogs: () => void
+  runScript: (script: { name: string; command: string; kind: ScriptKind }, files: BundlerFile[], entry: string | null, ownerPath?: string) => Promise<void>
   stop: () => Promise<void>
 }
 
@@ -45,7 +67,7 @@ let runtimeHandle: LocalRuntimeHandle | null = null
 let watchUnsub: (() => void) | null = null
 let watchDebounce: ReturnType<typeof setTimeout> | null = null
 
-function buildHtml(js: string, serverName: string): string {
+function buildHtml(js: string, serverName: string, siteViewerUrl: string): string {
   return `<!doctype html>
 <html class="dark" style="background:#0b1020;color:#e2e8f0">
 <head>
@@ -55,7 +77,13 @@ function buildHtml(js: string, serverName: string): string {
 </head>
 <body>
   <div id="root"></div>
-  <script>window.__SERVER_NAME__ = ${JSON.stringify(serverName)}<\/script>
+  <script>
+  window.__SERVER_NAME__ = ${JSON.stringify(serverName)}
+  window.__SITE_VIEWER_URL__ = ${JSON.stringify(siteViewerUrl)}
+  window.baseUrl = ${JSON.stringify(siteViewerUrl + '/' + serverName )}
+    
+    
+  <\/script>
   <script>${js}<\/script>
 </body>
 </html>`
@@ -164,6 +192,7 @@ function collectServerSource(projectId: string | undefined): Record<string, stri
 export const useScriptRunnerStore = create<ScriptRunnerState>((set, get) => ({
   phase: 'idle',
   scriptName: null,
+  ownerPath: null,
   message: '',
   errors: [],
   serverName: null,
@@ -172,6 +201,18 @@ export const useScriptRunnerStore = create<ScriptRunnerState>((set, get) => ({
   devWatching: false,
   lastBuiltAt: null,
   durationMs: 0,
+  serverLogs: [],
+
+  appendServerLog: (level, text) => {
+    set((state) => {
+      const next = state.serverLogs.length >= MAX_SERVER_LOGS
+        ? state.serverLogs.slice(state.serverLogs.length - MAX_SERVER_LOGS + 1)
+        : state.serverLogs.slice()
+      next.push({ ts: Date.now(), level, text })
+      return { serverLogs: next }
+    })
+  },
+  clearServerLogs: () => set({ serverLogs: [] }),
 
   stop: async () => {
     buildSeq++
@@ -181,6 +222,7 @@ export const useScriptRunnerStore = create<ScriptRunnerState>((set, get) => ({
       phase: 'idle',
       message: 'stopped',
       scriptName: null,
+      ownerPath: null,
       serverName: null,
       viewerUrl: null,
       connectionUrl: null,
@@ -188,17 +230,19 @@ export const useScriptRunnerStore = create<ScriptRunnerState>((set, get) => ({
     })
   },
 
-  runScript: async (script, files, entry) => {
+  runScript: async (script, files, entry, ownerPath) => {
+    const ownerPatch = ownerPath !== undefined ? { ownerPath } : {}
     if (script.kind === 'start') {
       if (runtimeHandle) {
-        set({ phase: 'ok', scriptName: script.name, message: 'serving last build', errors: [] })
+        set({ ...ownerPatch, phase: 'ok', scriptName: script.name, message: 'serving last build', errors: [] })
       } else {
-        set({ phase: 'error', scriptName: script.name, errors: ['no prior build — run `dev` or `build` first'], message: '' })
+        set({ ...ownerPatch, phase: 'error', scriptName: script.name, errors: ['no prior build — run `dev` or `build` first'], message: '' })
       }
       return
     }
     if (script.kind === 'unknown') {
       set({
+        ...ownerPatch,
         phase: 'error',
         scriptName: script.name,
         errors: [`"${script.command}" is not supported yet. Known: vite build/dev, vite preview, tsc, esbuild --bundle.`],
@@ -207,13 +251,14 @@ export const useScriptRunnerStore = create<ScriptRunnerState>((set, get) => ({
       return
     }
     if (!entry) {
-      set({ phase: 'error', scriptName: script.name, errors: ['No entry file found (looked for /index.tsx, /src/main.tsx, etc.)'], message: '' })
+      set({ ...ownerPatch, phase: 'error', scriptName: script.name, errors: ['No entry file found (looked for /index.tsx, /src/main.tsx, etc.)'], message: '' })
       return
     }
     stopWatching()
     const seq = ++buildSeq
     const isFirst = !bundler
     set({
+      ...ownerPatch,
       phase: isFirst ? 'initializing' : 'building',
       scriptName: script.name,
       message: isFirst ? 'downloading esbuild.wasm…' : 'compiling…',
@@ -227,8 +272,17 @@ export const useScriptRunnerStore = create<ScriptRunnerState>((set, get) => ({
       })
     }
     // PATCH: Force IIFE output to avoid ESM export syntax in preview server
-    // Pass globalName to ensure esbuild emits a true IIFE bundle
-    const res = await b.build({ files, entry, format: 'iife', globalName: '__browserverPreview' })
+    // Pass globalName to ensure esbuild emits a true IIFE bundle.
+    // Prepend the local plat-client dist as VFS entries + alias map so bare
+    // imports of `@modularizer/plat-client` resolve to the checkout in this
+    // repo instead of going through esm.sh.
+    const res = await b.build({
+      files: [...platClientFiles, ...files],
+      entry,
+      format: 'iife',
+      globalName: '__browserverPreview',
+      importAliases: platClientAliases,
+    })
     if (seq !== buildSeq) return
     if (!res.ok) {
       await stopRuntime()
@@ -245,7 +299,7 @@ export const useScriptRunnerStore = create<ScriptRunnerState>((set, get) => ({
     }
     const js = res.outputs[0]?.contents ?? ''
     const serverNameForRun = runtimeHandle?.serverName ?? deriveServerName(script.command)
-    const html = buildHtml(js, serverNameForRun)
+    const html = buildHtml(js, serverNameForRun, import.meta.env.VITE_SITE_VIEWER_ORIGIN ?? '')
 
     set({ phase: 'serving', message: runtimeHandle ? 'restarting preview server…' : 'starting preview server…' })
     const projectId = useWorkspaceStore.getState().sample?.id ?? 'preview'
@@ -286,8 +340,9 @@ export const useScriptRunnerStore = create<ScriptRunnerState>((set, get) => ({
           watchDebounce = setTimeout(() => {
             watchDebounce = null
             const nextFiles = filesFromWorkspace()
-            const nextEntry = inferEntry(nextFiles)
-            void get().runScript(script, nextFiles, nextEntry)
+            const nextOwnerPath = get().ownerPath ?? ownerPath
+            const nextEntry = inferEntry(nextFiles, nextOwnerPath ?? undefined)
+            void get().runScript(script, nextFiles, nextEntry, nextOwnerPath ?? undefined)
           }, 150)
         })
       }
@@ -322,8 +377,49 @@ export function inferScriptKindByName(name: string): ScriptKind {
   return 'unknown'
 }
 
-export function inferEntry(files: BundlerFile[]): string | null {
+export function inferEntry(files: BundlerFile[], ownerPath?: string): string | null {
+  const scopedFiles = ownerPath ? filesInOwnerPackage(files, ownerPath) : files
+  const preferred = inferEntryFromCandidates(scopedFiles)
+  if (preferred) return preferred
+
+  if (scopedFiles !== files) {
+    const fallback = inferEntryFromCandidates(files)
+    if (fallback) return fallback
+  }
+
+  return null
+}
+
+function inferEntryFromCandidates(files: BundlerFile[]): string | null {
   const candidates = ['/index.tsx', '/index.ts', '/index.jsx', '/index.js', '/src/main.tsx', '/src/index.tsx', '/main.tsx']
   for (const c of candidates) if (files.some((f) => f.path === c)) return c
   return files.find((f) => f.path.endsWith('.tsx'))?.path ?? null
+}
+
+function filesInOwnerPackage(files: BundlerFile[], ownerPath: string): BundlerFile[] {
+  const packageDir = ownerPath.replace(/\/package\.json$/i, '')
+  const packageJson = files.find((file) => file.path === ownerPath)
+  const explicitEntry = packageJson ? getBrowserverEntryFromPackageJson(packageJson.contents, packageDir) : null
+  if (explicitEntry) {
+    const matching = files.find((file) => file.path === explicitEntry)
+    if (matching) return [matching, ...files.filter((file) => file.path !== explicitEntry)]
+  }
+
+  if (!packageDir) return files
+  const prefix = `${packageDir}/`
+  return files
+    .filter((file) => file.path.startsWith(prefix))
+    .map((file) => ({ ...file, path: file.path.slice(packageDir.length) || '/' }))
+}
+
+function getBrowserverEntryFromPackageJson(contents: string, packageDir: string): string | null {
+  try {
+    const parsed = JSON.parse(contents) as { browserver?: { entry?: unknown } }
+    const entry = parsed?.browserver?.entry
+    if (typeof entry !== 'string' || !entry.trim()) return null
+    const normalized = entry.trim().replace(/^\.?\//, '')
+    return `${packageDir}/${normalized.startsWith('/') ? normalized.slice(1) : normalized}`
+  } catch {
+    return null
+  }
 }

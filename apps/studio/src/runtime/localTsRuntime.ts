@@ -7,6 +7,7 @@ import { buildCssTargetUrl } from './clientTargetUrl'
 import { useIdentityStore } from '../store/identity'
 import { useNamespaceStore } from '../store/namespace'
 import { useWorkspaceStore } from '../store/workspace'
+import { useScriptRunnerStore, type ServerLogLevel } from '../store/scriptRunner'
 import { buildRuntimeEnvBindings } from './runtimeEnv'
 import { collectWorkspaceDotEnv, createTsCompatAliases, mergeInjectedProcessEnv, rewriteTsCompatImports } from './tsCompatShims'
 import type {
@@ -123,6 +124,7 @@ export async function startLocalTsRuntime(options: {
 
   const staticExports = await resolveStaticExports()
   const staticAlias = createStaticAliasModuleUrl(staticExports)
+  const serverConsoleCleanup = installServerConsole()
   const runtimeEnv = buildRuntimeEnvBindings({
     projectId: options.projectId,
     serverName: options.serverName,
@@ -132,13 +134,17 @@ export async function startLocalTsRuntime(options: {
   const compatAliases = createTsCompatAliases({
     workspaceDotEnv,
     protectedEnvKeys: Object.keys(runtimeEnv),
+    serverName: options.serverName,
+    log: (level, text) => useScriptRunnerStore.getState().appendServerLog(level, text),
   })
-  const rewrittenSource = injectRuntimeEnvIntoTsSource(
-    rewriteTsCompatImports(
-      rewriteStaticImports(options.source, staticAlias.url),
-      compatAliases.specifierMap,
+  const rewrittenSource = prependServerConsolePreamble(
+    injectRuntimeEnvIntoTsSource(
+      rewriteTsCompatImports(
+        rewriteStaticImports(options.source, staticAlias.url),
+        compatAliases.specifierMap,
+      ),
+      effectiveEnv,
     ),
-    effectiveEnv,
   )
 
   // Inject workspace static files as a global so user code can reference __workspaceFiles.
@@ -215,11 +221,24 @@ export async function startLocalTsRuntime(options: {
     try { authorityBroadcastRef?.(peerMsg) } catch (err) { console.warn('[LocalTsRuntime] authority broadcast failed', err) }
   })
 
+  const logs = useScriptRunnerStore.getState()
+  logs.appendServerLog('info', `▸ starting server ${options.serverName}…`)
+
+  const composedOnRequest = (direction: 'request' | 'response', payload: unknown) => {
+    try {
+      const line = summarizeRequestLog(direction, payload)
+      if (line) logs.appendServerLog(direction === 'request' ? 'info' : 'debug', line)
+    } catch {
+      // log summarization must never throw
+    }
+    options.onRequest?.(direction, payload)
+  }
+
   const started = await startClientSideServerFromSource({
     source: rewrittenSource,
     serverName: options.serverName,
     sourceEntryPoint: typeof options.source === 'object' && 'index.ts' in options.source ? 'index.ts' : undefined,
-    onRequest: options.onRequest,
+    onRequest: composedOnRequest,
   })
   signalerRef = started.signaler as unknown as { broadcast?: (m: unknown) => Promise<void> }
 
@@ -227,6 +246,7 @@ export async function startLocalTsRuntime(options: {
   const resolvedServerName = connectionUrl?.startsWith('css://')
     ? connectionUrl.slice('css://'.length)
     : options.serverName
+  logs.appendServerLog('info', `✓ server ready — ${connectionUrl ?? resolvedServerName}`)
   const hostToken = useIdentityStore.getState().user?.idToken ?? ''
   const authorityHandle = !resolvedServerName.startsWith('dmz/') && hostToken
     ? await registerAuthorityHostedServer({
@@ -262,7 +282,9 @@ export async function startLocalTsRuntime(options: {
       }
       staticAlias.dispose()
       compatAliases.dispose()
+      serverConsoleCleanup()
       delete (globalThis as any).__workspaceFiles
+      useScriptRunnerStore.getState().appendServerLog('info', `■ server stopped — ${resolvedServerName}`)
       debugLocalTsRuntime('stop.done', {
         serverName: resolvedServerName,
       })
@@ -508,6 +530,112 @@ function injectRuntimeEnvIntoTsSource(
       return [path, `${bootstrap}\n${content}`]
     }),
   )
+}
+
+/**
+ * Shadow `console` in every server module with a wrapper that also routes
+ * output to the studio's build-pane log sink. Each TS source file gets a
+ * module-scoped `var console = ...` prepended; the wrapper itself is
+ * installed on globalThis so it survives the transpile step below.
+ */
+const SERVER_CONSOLE_PREAMBLE = 'var console = globalThis.__browserverServerConsole || globalThis.console;\n'
+
+function prependServerConsolePreamble(source: string | Record<string, string>): string | Record<string, string> {
+  if (typeof source === 'string') return SERVER_CONSOLE_PREAMBLE + source
+  return Object.fromEntries(
+    Object.entries(source).map(([path, content]) => {
+      if (!/\.[cm]?[jt]sx?$/i.test(path)) return [path, content]
+      return [path, SERVER_CONSOLE_PREAMBLE + content]
+    }),
+  )
+}
+
+function installServerConsole(): () => void {
+  const real = globalThis.console
+  const levels: ServerLogLevel[] = ['log', 'info', 'warn', 'error', 'debug']
+  const append = (level: ServerLogLevel, args: unknown[]) => {
+    try {
+      useScriptRunnerStore.getState().appendServerLog(level, args.map(formatLogArg).join(' '))
+    } catch {
+      // swallow — never let log routing break server execution
+    }
+  }
+  const wrapped: Record<string, unknown> = Object.create(real)
+  for (const level of levels) {
+    wrapped[level] = (...args: unknown[]) => {
+      append(level, args)
+      ;(real as any)[level]?.(...args)
+    }
+  }
+  ;(globalThis as any).__browserverServerConsole = wrapped
+  return () => {
+    if ((globalThis as any).__browserverServerConsole === wrapped) {
+      delete (globalThis as any).__browserverServerConsole
+    }
+  }
+}
+
+function formatLogArg(value: unknown): string {
+  if (value instanceof Error) return value.stack ?? `${value.name}: ${value.message}`
+  if (typeof value === 'string') return value
+  try { return JSON.stringify(value) } catch { return String(value) }
+}
+
+function summarizeRequestLog(direction: 'request' | 'response', payload: unknown): string | null {
+  if (!payload || typeof payload !== 'object') return null
+  const p = payload as Record<string, unknown>
+  const arrow = direction === 'request' ? '→' : '←'
+  const method = typeof p.method === 'string' ? p.method.toUpperCase() : undefined
+  const path = typeof p.path === 'string' ? p.path
+    : typeof p.url === 'string' ? p.url
+    : typeof p.name === 'string' ? p.name
+    : undefined
+  const status = typeof p.status === 'number' ? ` ${p.status}` : ''
+  const errorText = summarizeError(p.error ?? (p.body as Record<string, unknown> | undefined)?.error)
+  const inputPreview = direction === 'request' ? summarizeInput(p) : ''
+  if (method || path) {
+    return `${arrow} ${method ?? ''}${method && path ? ' ' : ''}${path ?? ''}${status}${inputPreview}${errorText ? ' — ' + errorText : ''}`.trim()
+  }
+  if (errorText) return `${arrow}${status} — ${errorText}`
+  const compact = truncate(formatLogArg(payload), 240)
+  return `${arrow} ${compact}`
+}
+
+function summarizeInput(p: Record<string, unknown>): string {
+  const body = (p.input ?? p.params ?? p.body) as unknown
+  if (body != null) {
+    try { return ` ${truncate(formatLogArg(body), 400)}` } catch { /* fall through */ }
+  }
+  // Diagnostic fallback: dump top-level payload keys (minus noisy ones) so we
+  // can see where the request body actually lives in the envelope.
+  try {
+    const skip = new Set(['method', 'path', 'jsonrpc', 'id', 'headers', 'operationId'])
+    const preview: Record<string, unknown> = {}
+    for (const k of Object.keys(p)) if (!skip.has(k)) preview[k] = p[k]
+    const otherKeys = Object.keys(preview)
+    const allKeys = Object.keys(p)
+    const summary = otherKeys.length > 0
+      ? formatLogArg(preview)
+      : `keys=[${allKeys.join(',')}]`
+    return ` ${truncate(summary, 400)}`
+  } catch {
+    return ''
+  }
+}
+
+function summarizeError(value: unknown): string | null {
+  if (!value) return null
+  if (typeof value === 'string') return value
+  if (typeof value === 'object') {
+    const v = value as Record<string, unknown>
+    if (typeof v.message === 'string') return v.message
+    if (typeof v.error === 'string') return v.error
+  }
+  return null
+}
+
+function truncate(text: string, max: number): string {
+  return text.length > max ? text.slice(0, max - 1) + '…' : text
 }
 
 function buildTsRuntimeEnvBootstrap(env: Record<string, string>): string {

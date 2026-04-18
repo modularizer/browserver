@@ -3,9 +3,6 @@ import * as monaco from 'monaco-editor'
 import SwaggerUI from 'swagger-ui-react'
 import 'swagger-ui-react/swagger-ui.css'
 import { RedocStandalone } from 'redoc'
-import {
-  createPlatFetch,
-} from '@modularizer/plat-client/client-server'
 import type { DatabaseSnapshot } from '@browserver/database'
 import type { WorkspaceSnapshot } from '@browserver/storage'
 import type { ProjectBundle } from '../config/projectBundle'
@@ -24,14 +21,9 @@ import { useLayoutStore } from '../store/layout'
 import { useNamespaceStore } from '../store/namespace'
 import {
   useRuntimeStore,
-  getRuntimeServerForConnectionUrl,
-  getRuntimeServerForServerName,
 } from '../store/runtime'
-import { createInProcessChannel } from '../runtime/inProcessChannel'
-import { createBrowserverCssFetchConnection } from '../runtime/cssTransport'
-import { buildCssTargetUrl, parseCssServerName } from '../runtime/clientTargetUrl'
-import { buildSiteViewerUrl } from '../runtime/siteViewerUrl'
-import { usePlatBrowserFrame } from '../browser/usePlatBrowserFrame'
+import { parseCssServerName } from '../runtime/clientTargetUrl'
+import { buildSiteViewerUrlWithSearch, resolveSiteViewerOrigin } from '../runtime/siteViewerUrl'
 import { useThemeStore } from '../theme'
 import {
   getEditorViewId,
@@ -967,55 +959,69 @@ function ProblemsView() {
 function BrowserView() {
   const tabSessions = useRuntimeStore((state) => state.tabSessions)
   const connectionUrl = useRuntimeStore((state) => state.connectionUrl)
+  const iframeRef = useRef<HTMLIFrameElement>(null)
+  const [browserUrl, setBrowserUrl] = useState('css://')
+  const [iframeSrc, setIframeSrc] = useState<string | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
   const hasRunningServer = Object.values(tabSessions).some((session) => (
     session.mode === 'server' && session.status === 'running'
   ))
-  const createConnection = useCallback(async (targetConnectionUrl: string) => {
-    const targetServerName = parseCssServerName(targetConnectionUrl) ?? ''
-    const inProcessServer = getRuntimeServerForConnectionUrl(targetConnectionUrl)
-      ?? (targetServerName ? getRuntimeServerForServerName(targetServerName) : null)
 
-    if (inProcessServer) {
-      const channel = createInProcessChannel(inProcessServer)
-      return {
-        fetch: createPlatFetch({ channel }),
-        connectionUrl: targetConnectionUrl,
+  const resolveBrowserIframeUrl = useCallback((rawTarget: string): string | null => {
+    const trimmed = rawTarget.trim()
+    if (!trimmed.startsWith('css://')) return null
+
+    const serverName = parseCssServerName(trimmed)
+    if (!serverName) return null
+
+    let previewPath = '/'
+    let search = ''
+    try {
+      const parsed = new URL(trimmed)
+      previewPath = parsed.pathname || '/'
+      search = parsed.search || ''
+    } catch {
+      const withoutScheme = trimmed.slice('css://'.length)
+      const slashIndex = withoutScheme.indexOf('/')
+      const queryIndex = withoutScheme.indexOf('?')
+      const pathStart = slashIndex >= 0 ? slashIndex : queryIndex
+      if (pathStart >= 0) {
+        const suffix = withoutScheme.slice(pathStart)
+        const splitQuery = suffix.indexOf('?')
+        previewPath = splitQuery >= 0 ? (suffix.slice(0, splitQuery) || '/') : (suffix || '/')
+        search = splitQuery >= 0 ? suffix.slice(splitQuery) : ''
       }
     }
 
-    const connection = await createBrowserverCssFetchConnection(targetConnectionUrl)
-    return {
-      ...connection,
-      connectionUrl: buildCssTargetUrl(connection.matchedServerName),
-    }
+    return buildSiteViewerUrlWithSearch(serverName, previewPath, search)
   }, [])
 
-  const {
-    iframeRef,
-    browserUrl,
-    setBrowserUrl,
-    loading,
-    error,
-    navigate,
-    closeConnection,
-  } = usePlatBrowserFrame({
-    initialUrl: 'css://',
-    createConnection,
-  })
+  const navigate = useCallback((rawTarget: string) => {
+    const nextUrl = resolveBrowserIframeUrl(rawTarget)
+    if (!nextUrl) {
+      setError('Enter a css:// address with a valid server name.')
+      return
+    }
+
+    setError(null)
+    setLoading(true)
+    setIframeSrc(nextUrl)
+
+    if (iframeRef.current) {
+      iframeRef.current.src = nextUrl
+    }
+  }, [resolveBrowserIframeUrl])
 
   const openInOwnTab = useCallback(() => {
     const source = browserUrl.trim().startsWith('css://')
       ? browserUrl
       : (connectionUrl ?? '')
-    const serverName = parseCssServerName(source)
-      ?? parseCssServerName(connectionUrl ?? '')
-    if (!serverName) return
-
-    const href = buildSiteViewerUrl(serverName)
+    const href = resolveBrowserIframeUrl(source)
     if (!href) return
     window.open(href, '_blank', 'noopener,noreferrer')
-  }, [browserUrl, connectionUrl])
+  }, [browserUrl, connectionUrl, resolveBrowserIframeUrl])
 
   // Auto-navigate on mount or server restart
   useEffect(() => {
@@ -1027,14 +1033,7 @@ function BrowserView() {
 
     const timer = setTimeout(() => navigate(target), 200)
     return () => clearTimeout(timer)
-  }, [hasRunningServer, connectionUrl])
-
-  useEffect(() => {
-    if (!hasRunningServer) {
-      void closeConnection()
-      return
-    }
-  }, [closeConnection, hasRunningServer])
+  }, [hasRunningServer, connectionUrl, browserUrl, navigate])
 
   useEffect(() => {
     if (!connectionUrl?.startsWith('css://')) return
@@ -1044,8 +1043,13 @@ function BrowserView() {
         : current
     ))
   }, [connectionUrl])
-
-
+  
+  useEffect(() => {
+    if (!hasRunningServer) {
+      setLoading(false)
+      setIframeSrc(null)
+    }
+  }, [hasRunningServer])
 
   return (
     <div className="flex h-full flex-col bg-bs-bg-panel">
@@ -1098,10 +1102,18 @@ function BrowserView() {
         </div>
       )}
 
+      {hasRunningServer && !resolveSiteViewerOrigin() && (
+        <div className="flex flex-1 items-center justify-center px-6 text-center text-[12px] text-bs-text-faint">
+          Set `VITE_SITE_VIEWER_ORIGIN` to use the browser preview. The preview now runs entirely through the standalone site-viewer app and its service worker.
+        </div>
+      )}
+
       {/* Iframe */}
       <iframe
         ref={iframeRef}
-        className={`flex-1 border-0 bg-white ${!hasRunningServer ? 'hidden' : ''}`}
+        src={iframeSrc ?? undefined}
+        onLoad={() => setLoading(false)}
+        className={`flex-1 border-0 bg-white ${!hasRunningServer || !resolveSiteViewerOrigin() ? 'hidden' : ''}`}
         sandbox="allow-scripts allow-same-origin"
         title="Browser Preview"
       />

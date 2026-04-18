@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
-import { connectClientSideServer, type OpenAPIClient } from '@modularizer/plat-client/client-server'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { createClient } from '@modularizer/plat-client'
 import type { StatsSummary } from './schema'
 import type { GuessResult, LetterState } from './types'
 
@@ -15,13 +15,9 @@ function stateClass(state: LetterState | undefined, filled: boolean): string {
   return 'bg-slate-900 border-slate-700 text-slate-400'
 }
 
-declare global {
-  interface Window { __SERVER_NAME__?: string }
-}
-
 export function App() {
-  const [client, setClient] = useState<OpenAPIClient | null>(null)
-  const [sessionId, setSessionId] = useState<string | null>(null)
+  const [client, setClient] = useState<any>(null)
+  const sessionIdRef = useRef<string | null>(null)
   const [guesses, setGuesses] = useState<GuessResult[]>([])
   const [current, setCurrent] = useState('')
   const [gameOver, setGameOver] = useState(false)
@@ -30,23 +26,28 @@ export function App() {
   const [stats, setStats] = useState<StatsSummary>(EMPTY_STATS)
 
   useEffect(() => {
-    const serverName = window.__SERVER_NAME__
-    if (!serverName) { setBanner('Missing __SERVER_NAME__'); return }
+    // Use window.baseUrl (must be set by index.html)
+    const baseUrl = (window as any).baseUrl
+    if (!baseUrl) throw new Error('window.baseUrl is not set')
     let cancelled = false
-    void connectClientSideServer({ baseUrl: `css://${serverName}` })
-      .then(async (conn) => {
+    void (async () => {
+      try {
+        const c = await createClient(baseUrl)
         if (cancelled) return
-        setClient(conn.client)
-        try { setStats(await conn.client.getStats() as StatsSummary) } catch {}
-      })
-      .catch((err) => setBanner(`connect failed: ${String(err?.message ?? err)}`))
+        setClient(() => c)
+        const s = await c.getStats({}) as StatsSummary
+        if (!cancelled) setStats(s)
+      } catch (err: any) {
+        if (!cancelled) setBanner(`connect failed: ${String(err?.message ?? err)}`)
+      }
+    })()
     return () => { cancelled = true }
   }, [])
 
   const newGame = useCallback(async () => {
     if (!client) return
-    const session = await client.startGame() as { id: string }
-    setSessionId(session.id)
+    const session = await client.startGame({}) as { id: string }
+    sessionIdRef.current = session.id
     setGuesses([])
     setCurrent('')
     setGameOver(false)
@@ -57,10 +58,11 @@ export function App() {
   useEffect(() => { if (client) void newGame() }, [client, newGame])
 
   const onSubmit = useCallback(async () => {
-    if (!client || !sessionId || gameOver) return
+    const activeSessionId = sessionIdRef.current
+    if (!client || !activeSessionId || gameOver) return
     if (current.length !== WORD_LEN) { setBanner('Need 5 letters'); return }
     try {
-      const res = await client.submitGuess({ sessionId, guess: current }) as GuessResult
+      const res = await client.submitGuess({ sessionId: activeSessionId, guess: current }) as GuessResult
       setGuesses((g) => [...g, res])
       setCurrent('')
       setBanner(null)
@@ -68,12 +70,12 @@ export function App() {
         setGameOver(true)
         setAnswer(res.answer ?? null)
         setBanner(res.won ? `Solved in ${res.attemptsUsed}!` : `Answer: ${res.answer?.toUpperCase()}`)
-        setStats(await client.getStats() as StatsSummary)
+        setStats(await client.getStats({}) as StatsSummary)
       }
     } catch (err: any) {
       setBanner(String(err?.message ?? err))
     }
-  }, [client, current, sessionId, gameOver])
+  }, [client, current, gameOver])
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -106,7 +108,7 @@ export function App() {
   const winRate = stats.played > 0 ? Math.round((stats.wins / stats.played) * 100) : 0
   const resetStats = useCallback(async () => {
     if (!client) return
-    setStats(await client.resetStats() as StatsSummary)
+    setStats(await client.resetStats({}) as StatsSummary)
   }, [client])
 
   return (

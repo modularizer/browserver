@@ -1,3 +1,4 @@
+import { createRedisShimModule, type FakeRedisLogger } from './fakeRedisShim'
 import type { RuntimeEnvBindings } from './runtimeEnv'
 
 export interface WorkspaceShimFile {
@@ -28,6 +29,7 @@ const SHIM_SPECIFIERS = {
   path: ['path', 'node:path'],
   url: ['url', 'node:url'],
   buffer: ['buffer', 'node:buffer'],
+  redis: ['redis'],
 } as const
 
 export function collectWorkspaceDotEnv(files: ReadonlyArray<WorkspaceShimFile>, projectId?: string): Record<string, string> {
@@ -78,6 +80,8 @@ export function rewriteTsCompatImports(source: string | Record<string, string>, 
 export function createTsCompatAliases(options: {
   workspaceDotEnv: Record<string, string>
   protectedEnvKeys?: Iterable<string>
+  serverName?: string
+  log?: FakeRedisLogger
 }): TsCompatAliases {
   const protectedKeys = new Set(options.protectedEnvKeys ?? [])
   const registry = ((globalThis as Record<string, unknown>).__browserverCompatModuleRegistry ??= new Map<string, Record<string, unknown>>()) as Map<string, Record<string, unknown>>
@@ -104,6 +108,8 @@ export function createTsCompatAliases(options: {
   register(SHIM_SPECIFIERS.path, createPathModule(), ['basename', 'delimiter', 'dirname', 'extname', 'format', 'join', 'normalize', 'parse', 'posix', 'resolve', 'sep'])
   register(SHIM_SPECIFIERS.url, createUrlModule(), ['URL', 'URLSearchParams', 'fileURLToPath', 'pathToFileURL'])
   register(SHIM_SPECIFIERS.buffer, createBufferModule(), ['Buffer', 'INSPECT_MAX_BYTES', 'kMaxLength'])
+  const redisDefaultPrefix = options.serverName ? `browserver:${options.serverName}:` : undefined
+  register(SHIM_SPECIFIERS.redis, createRedisShimModule({ defaultPrefix: redisDefaultPrefix, log: options.log }), ['createClient'])
 
   return {
     specifierMap,
@@ -117,6 +123,8 @@ export function createTsCompatAliases(options: {
 export function createCommonJsCompatModules(options: {
   workspaceDotEnv: Record<string, string>
   protectedEnvKeys?: Iterable<string>
+  serverName?: string
+  log?: FakeRedisLogger
 }): Record<string, unknown> {
   const protectedKeys = new Set(options.protectedEnvKeys ?? [])
   const dotenvModule = createDotenvModule(options.workspaceDotEnv, protectedKeys)
@@ -125,6 +133,8 @@ export function createCommonJsCompatModules(options: {
   const urlModule = createUrlModule()
   const bufferModule = createBufferModule()
   const dotenvConfigModule = createDotenvConfigModule(dotenvModule)
+  const redisDefaultPrefix = options.serverName ? `browserver:${options.serverName}:` : undefined
+  const redisModule = createRedisShimModule({ defaultPrefix: redisDefaultPrefix, log: options.log })
 
   return Object.fromEntries([
     ...SHIM_SPECIFIERS.dotenv.map((specifier) => [specifier, dotenvModule]),
@@ -133,6 +143,7 @@ export function createCommonJsCompatModules(options: {
     ...SHIM_SPECIFIERS.path.map((specifier) => [specifier, pathModule]),
     ...SHIM_SPECIFIERS.url.map((specifier) => [specifier, urlModule]),
     ...SHIM_SPECIFIERS.buffer.map((specifier) => [specifier, bufferModule]),
+    ...SHIM_SPECIFIERS.redis.map((specifier) => [specifier, redisModule]),
   ])
 }
 

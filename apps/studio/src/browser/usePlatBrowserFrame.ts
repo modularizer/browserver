@@ -58,8 +58,49 @@ function parseBrowserTarget(rawInput: string): {
   return { directUrl: null, connectionUrl: connectionTarget, requestPath: '/', requestSearch }
 }
 
+<<<<<<< ours
 function injectBridgeScript(html: string): string {
   const bridgeScript = `<script>${generateBridgeScript()}</script>`
+=======
+function buildBridgeBodyPatchScript(): string {
+  return `<script>
+(() => {
+  const originalFetch = window.fetch.bind(window)
+
+  async function normalizeBody(body) {
+    if (body == null) return undefined
+    if (typeof body === 'string') return body
+    if (body instanceof URLSearchParams) return body.toString()
+    if (body instanceof FormData) return new URLSearchParams(body).toString()
+    if (body instanceof Blob) return await body.text()
+    if (body instanceof ArrayBuffer) return new TextDecoder().decode(body)
+    if (ArrayBuffer.isView(body)) return new TextDecoder().decode(body)
+    if (body instanceof ReadableStream) return await new Response(body).text()
+    return String(body)
+  }
+
+  window.fetch = async function(input, init) {
+    const nextInit = init ? { ...init } : {}
+
+    if (nextInit.body == null && typeof Request !== 'undefined' && input instanceof Request) {
+      if (input.method !== 'GET' && input.method !== 'HEAD') {
+        nextInit.body = await input.clone().text()
+      }
+      if (!nextInit.method) nextInit.method = input.method
+      if (!nextInit.headers) nextInit.headers = input.headers
+    } else if (nextInit.body != null) {
+      nextInit.body = await normalizeBody(nextInit.body)
+    }
+
+    return originalFetch(input, nextInit)
+  }
+})()
+</script>`
+}
+
+function injectBridgeScript(html: string): string {
+  const bridgeScript = `<script>${generateBridgeScript()}</script>${buildBridgeBodyPatchScript()}`
+>>>>>>> theirs
   if (html.includes('<head>')) return html.replace('<head>', `<head>${bridgeScript}`)
   if (html.includes('</head>')) return html.replace('</head>', `${bridgeScript}</head>`)
   if (html.includes('<html>')) return html.replace('<html>', `<html><head>${bridgeScript}</head>`)

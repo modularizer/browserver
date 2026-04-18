@@ -11,6 +11,8 @@ export type BuildRequest = {
   jsxDev?: boolean
   format?: 'esm' | 'iife' | 'cjs'
   globalName?: string
+  /** Bare-specifier → vfs path redirects, consulted before the CDN fallback. */
+  importAliases?: Record<string, string>
 }
 
 export type InitRequest = {

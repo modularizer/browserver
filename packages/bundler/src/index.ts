@@ -20,6 +20,8 @@ export type BuildArgs = {
   jsxDev?: boolean
   format?: 'esm' | 'iife' | 'cjs'
   globalName?: string // for iife
+  /** Bare-specifier → vfs path redirects, consulted before the CDN fallback. */
+  importAliases?: Record<string, string>
 }
 
 export class Bundler {

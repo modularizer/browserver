@@ -11,7 +11,7 @@ import { startPythonRuntime } from '../runtime/pythonRuntime'
 import { buildCssTargetUrl, normalizeClientApiBaseUrl, normalizeCssTargetUrl, parseCssServerName } from '../runtime/clientTargetUrl'
 import { extractOperationsFromOpenApi } from '../runtime/openapiOperations'
 import { invokeOpenApiClientOperation } from '../runtime/openapiInvoke'
-import { inferEntry, useScriptRunnerStore } from './scriptRunner'
+import { inferEntry, useScriptRunnerStore, type RunnerPhase } from './scriptRunner'
 import type {
   RuntimeAnalysisSummary,
   LocalRuntimeHandle,
@@ -737,7 +737,12 @@ export const useRuntimeStore = create<RuntimeState>()((set, get) => ({
 
       const files = getWorkspaceBundlerFiles()
       useWorkspaceStore.getState().setActiveBottomPanel?.('build')
-      await useScriptRunnerStore.getState().runScript({ name: 'dev', command, kind: 'dev' }, files, inferEntry(files))
+      await useScriptRunnerStore.getState().runScript(
+        { name: 'dev', command, kind: 'dev' },
+        files,
+        inferEntry(files, targetFile.path),
+        targetFile.path,
+      )
       return
     }
 
@@ -1271,3 +1276,59 @@ export const useRuntimeStore = create<RuntimeState>()((set, get) => ({
     } catch { /* fetchOperations logs its own errors */ }
   },
 }))
+
+// Mirror scriptRunner phase → tabSessions[ownerPath] so the favicon, runtime
+// pill, and .browserver.yaml autorestart reflect npm-script runs (e.g. running
+// a package.json's dev script). Guarded to survive Vite HMR module reloads.
+{
+  const flagKey = '__browserver_scriptRunnerMirrorUp'
+  const w = globalThis as Record<string, unknown>
+  if (!w[flagKey]) {
+    w[flagKey] = true
+    let lastPhase: RunnerPhase | null = null
+    let lastOwnerPath: string | null = null
+
+    useScriptRunnerStore.subscribe((state) => {
+      const phase = state.phase
+      const ownerPath = state.ownerPath
+      if (phase === lastPhase && ownerPath === lastOwnerPath) return
+      const prevOwnerPath = lastOwnerPath
+      lastPhase = phase
+      lastOwnerPath = ownerPath
+
+      const setRt = useRuntimeStore.setState
+      const getRt = useRuntimeStore.getState
+
+      if (prevOwnerPath && prevOwnerPath !== ownerPath) {
+        updateTabSession(setRt, getRt, prevOwnerPath, createEmptyTabSession())
+      }
+
+      if (!ownerPath) return
+
+      // Keep session green through dev-watch rebuilds: once a server is up,
+      // transient building/serving cycles shouldn't flash back to 'starting'.
+      const hasServer = Boolean(state.serverName)
+      const status: TabRuntimeSession['status'] =
+        phase === 'ok' ? 'running'
+        : phase === 'error' ? 'error'
+        : phase === 'idle' ? 'idle'
+        : hasServer ? 'running'
+        : 'starting'
+      const mode: TabRuntimeSession['mode'] = status === 'idle' ? 'idle' : 'server'
+      const errorMessage = phase === 'error' ? (state.errors[0] ?? null) : null
+
+      updateTabSession(setRt, getRt, ownerPath, {
+        mode,
+        language: 'typescript',
+        status,
+        launchable: status === 'running',
+        launchNote: null,
+        launchedFilePath: status === 'running' ? ownerPath : null,
+        launchedFileUpdatedAt: null,
+        serverName: state.serverName,
+        connectionUrl: state.connectionUrl,
+        errorMessage,
+      })
+    })
+  }
+}

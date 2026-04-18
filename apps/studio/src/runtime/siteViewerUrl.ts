@@ -2,14 +2,16 @@ function trimTrailingSlashes(value: string): string {
   return value.replace(/\/+$/g, '')
 }
 
-function isLocalDevHost(hostname: string): boolean {
-  return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]'
-}
-
 function normalizePreviewPath(previewPath?: string): string {
   const candidate = (previewPath ?? '/').trim() || '/'
   if (candidate === '/') return '/'
   return candidate.startsWith('/') ? candidate : `/${candidate}`
+}
+
+function normalizeSearch(search?: string): string {
+  const candidate = (search ?? '').trim()
+  if (!candidate) return ''
+  return candidate.startsWith('?') ? candidate : `?${candidate}`
 }
 
 function encodePath(value: string): string {
@@ -23,12 +25,7 @@ function encodePath(value: string): string {
 export function resolveSiteViewerOrigin(): string | null {
   const configured = import.meta.env.VITE_SITE_VIEWER_ORIGIN?.trim()
   if (configured) return trimTrailingSlashes(configured)
-
-  if (typeof window === 'undefined') return null
-  const { protocol, hostname, port } = window.location
-  if (!isLocalDevHost(hostname) || (protocol !== 'http:' && protocol !== 'https:')) return null
-  if (port === '5174') return trimTrailingSlashes(window.location.origin)
-  return `${protocol}//${hostname}:5174`
+  return null
 }
 
 function decodePathSegments(segments: string[]): string[] {
@@ -76,6 +73,10 @@ export function parseSiteViewerUrl(raw: string): {
 }
 
 export function buildSiteViewerUrl(serverName: string, previewPath?: string): string | null {
+  return buildSiteViewerUrlWithSearch(serverName, previewPath, '')
+}
+
+export function buildSiteViewerUrlWithSearch(serverName: string, previewPath?: string, search?: string): string | null {
   const origin = resolveSiteViewerOrigin()
   if (!origin) return null
 
@@ -86,9 +87,10 @@ export function buildSiteViewerUrl(serverName: string, previewPath?: string): st
   const pathname = encodedPreviewPath
     ? `/${encodedServerPath}/${encodedPreviewPath}`
     : `/${encodedServerPath}/`
+  const normalizedSearch = normalizeSearch(search)
 
   try {
-    return new URL(pathname, `${origin}/`).toString()
+    return new URL(`${pathname}${normalizedSearch}`, `${origin}/`).toString()
   } catch {
     return null
   }

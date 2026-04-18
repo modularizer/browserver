@@ -1,11 +1,32 @@
 import { serveClientSideServer } from '@modularizer/plat-client/client-server'
 import { StaticFolder } from '@modularizer/plat-client/static'
+import { createClient } from 'redis'
 import { ANSWERS } from './words'
 import { TABLES, type GameRow, type StatsSummary } from './schema'
 import type { GameSession, GuessResult, LetterState } from './types'
 
 const MAX_ATTEMPTS = 6
-const sessions = new Map<string, { answer: string; attemptsUsed: number }>()
+const SESSION_TTL_SECONDS = 60 * 60
+
+// Sessions live in Redis so they survive dev-watch runtime reloads (which wipe
+// module-level state). In the browser, `redis` is shimmed to a localStorage-
+// backed implementation by the browserver runtime — same API, no code change.
+// connect() is a no-op in the browser; real node-redis requires it, so the
+// call stays here so porting off-browser needs zero edits.
+const redis = createClient()
+await redis.connect()
+const sessionKey = (id: string) => `session:${id}`
+
+interface SessionState { answer: string; attemptsUsed: number }
+interface SubmitGuessInput { sessionId: string; guess: string }
+
+async function loadSession(id: string): Promise<SessionState | null> {
+  const raw = await redis.get(sessionKey(id))
+  return raw ? JSON.parse(raw) as SessionState : null
+}
+async function saveSession(id: string, state: SessionState): Promise<void> {
+  await redis.setEx(sessionKey(id), SESSION_TTL_SECONDS, JSON.stringify(state))
+}
 
 // ---------- tiny IndexedDB KV backing the 'games' table ----------
 //
@@ -100,12 +121,14 @@ class WordleApi {
   async startGame(): Promise<GameSession> {
     const id = crypto.randomUUID()
     const answer = ANSWERS[Math.floor(Math.random() * ANSWERS.length)]
-    sessions.set(id, { answer, attemptsUsed: 0 })
+    await saveSession(id, { answer, attemptsUsed: 0 })
     return { id, attemptsLeft: MAX_ATTEMPTS, wordLength: answer.length }
   }
 
-  async submitGuess({ sessionId, guess }: { sessionId: string; guess: string }): Promise<GuessResult> {
-    const session = sessions.get(sessionId)
+  async submitGuess(input: SubmitGuessInput): Promise<GuessResult> {
+    const { sessionId, guess } = input
+    if (!sessionId) throw new Error('Missing sessionId. Start a new game.')
+    const session = await loadSession(sessionId)
     if (!session) throw new Error('Unknown session. Start a new game.')
     const normalized = guess.toLowerCase()
     if (!/^[a-z]{5}$/.test(normalized)) throw new Error('Guess must be 5 letters.')
@@ -123,7 +146,9 @@ class WordleApi {
         won: won ? 1 : 0,
         playedAt: Date.now(),
       })
-      sessions.delete(sessionId)
+      await redis.del(sessionKey(sessionId))
+    } else {
+      await saveSession(sessionId, session)
     }
     return { guess: normalized, states, won, gameOver, attemptsUsed: session.attemptsUsed, attemptsLeft, answer }
   }

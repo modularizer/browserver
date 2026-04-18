@@ -247,6 +247,7 @@ async function revalidateInBackground(event, target, cacheKey, cached) {
 }
 
 async function cachedForwardViaBridge(event, target) {
+    console.log("handling req", event, event.request)
   if (!isCacheableMethod(event.request.method)) {
     return forwardViaBridge(event, target)
   }
@@ -341,9 +342,9 @@ self.addEventListener('fetch', (event) => {
 
   const target = resolveTargetFromRequest(req)
   if (!target) {
-    console.log('[site-viewer-sw] passthrough', req.method, u.pathname, 'ref=', req.referrer || '-')
+  //   console.log('[site-viewer-sw] passthrough', req.method, u.pathname, 'ref=', req.referrer || '-')
     return
   }
-  console.log('[site-viewer-sw] intercept', req.method, u.pathname, '→', target.serverName, target.tailPath)
+  console.log('[site-viewer-sw] intercept', req, target)
   event.respondWith(cachedForwardViaBridge(event, target))
 })

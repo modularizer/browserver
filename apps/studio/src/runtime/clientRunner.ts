@@ -37,6 +37,7 @@ export async function runClientSource(options: {
   const compatModules = createCommonJsCompatModules({
     workspaceDotEnv,
     protectedEnvKeys: Object.keys(runtimeEnv),
+    serverName: options.serverName,
   })
   const effectiveEnv = mergeInjectedProcessEnv(runtimeEnv, workspaceDotEnv)
   const processRef = ensureClientProcessEnv(effectiveEnv)

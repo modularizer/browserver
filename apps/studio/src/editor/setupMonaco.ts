@@ -390,6 +390,58 @@ declare module 'node:buffer' {
   export * from 'buffer'
 }
 
+declare module 'redis' {
+  export interface SetOptions {
+    EX?: number
+    PX?: number
+    NX?: boolean
+    XX?: boolean
+  }
+
+  export interface RedisClientOptions {
+    prefix?: string
+    url?: string
+    [key: string]: unknown
+  }
+
+  export interface RedisClientType {
+    connect(): Promise<void>
+    quit(): Promise<void>
+    disconnect(): Promise<void>
+
+    get(key: string): Promise<string | null>
+    set(key: string, value: string, options?: SetOptions): Promise<'OK' | null>
+    setEx(key: string, seconds: number, value: string): Promise<'OK'>
+    pSetEx(key: string, ms: number, value: string): Promise<'OK'>
+    del(keys: string | string[]): Promise<number>
+    exists(keys: string | string[]): Promise<number>
+    expire(key: string, seconds: number): Promise<boolean>
+    ttl(key: string): Promise<number>
+    keys(pattern: string): Promise<string[]>
+    incr(key: string): Promise<number>
+    decr(key: string): Promise<number>
+    incrBy(key: string, by: number): Promise<number>
+    decrBy(key: string, by: number): Promise<number>
+
+    hSet(key: string, field: string | Record<string, string>, value?: string): Promise<number>
+    hGet(key: string, field: string): Promise<string | undefined>
+    hGetAll(key: string): Promise<Record<string, string>>
+    hDel(key: string, fields: string | string[]): Promise<number>
+    hKeys(key: string): Promise<string[]>
+    hVals(key: string): Promise<string[]>
+    hExists(key: string, field: string): Promise<boolean>
+
+    publish(channel: string, message: string): Promise<number>
+    subscribe(channel: string, listener: (message: string, channel: string) => void): Promise<void>
+    unsubscribe(channel?: string): Promise<void>
+
+    flushDb(): Promise<'OK'>
+    flushAll(): Promise<'OK'>
+  }
+
+  export function createClient(options?: RedisClientOptions): RedisClientType
+}
+
 declare module '@browserver/core' {
   export interface Workspace {
     id: string

@@ -17,5 +17,20 @@
   <body>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
+    <script>
+      // Compute baseUrl, siteViewerBaseUrl, and serverName from the current location
+      (function() {
+        // Example logic, adjust as needed for your routing:
+        var path = window.location.pathname.replace(/\/+$/, '');
+        var segments = path.split('/').filter(Boolean);
+        // Assume serverName is the first segment, siteViewerBaseUrl is up to that
+        var serverName = segments[0] || '';
+        var siteViewerBaseUrl = window.location.origin + '/';
+        var baseUrl = window.location.origin + (segments.length ? '/' + serverName : '');
+        window.baseUrl = baseUrl;
+        window.siteViewerBaseUrl = siteViewerBaseUrl;
+        window.serverName = serverName;
+      })();
+    </script>
   </body>
 </html>

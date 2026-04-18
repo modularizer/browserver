@@ -20,7 +20,7 @@ function ensureInit(wasmURL: string): Promise<void> {
 
 const CDN = 'https://esm.sh'
 
-function vfsPlugin(files: BundlerFile[]): esbuild.Plugin {
+function vfsPlugin(files: BundlerFile[], aliases: Record<string, string> = {}): esbuild.Plugin {
   const map = new Map(files.map((f) => [normalize(f.path), f]))
   return {
     name: 'browserver-vfs',
@@ -49,6 +49,15 @@ function vfsPlugin(files: BundlerFile[]): esbuild.Plugin {
         if (args.path === 'react-dom/client') {
           // Use ESM build from esm.sh for react-dom/client
           return { path: 'https://esm.sh/react-dom@18/client', namespace: 'cdn', external: false }
+        }
+        // Alias map: bare specifier → vfs path. Checked before CDN fallback so we
+        // can route e.g. `@modularizer/plat-client` to a locally bundled copy.
+        if (!args.path.startsWith('.') && !args.path.startsWith('/') && !/^https?:\/\//.test(args.path)) {
+          const mapped = aliases[args.path]
+          if (mapped) {
+            const target = normalize(mapped)
+            if (map.has(target)) return { path: target, namespace: 'vfs' }
+          }
         }
         // Imports inside a CDN module
         if (args.namespace === 'cdn') {
@@ -163,7 +172,7 @@ async function handleBuild(req: BuildRequest): Promise<WorkerResponse> {
       jsxDev: req.jsxDev ?? false,
       sourcemap: 'inline',
       write: false,
-      plugins: [vfsPlugin(req.files)],
+      plugins: [vfsPlugin(req.files, req.importAliases)],
       logLevel: 'silent',
       platform: 'browser',
       entryNames: 'main',
