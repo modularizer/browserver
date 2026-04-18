@@ -1,4 +1,4 @@
-import { OpenAPIClient } from '@modularizer/plat-client/client-server'
+import { OpenAPIClient } from '@modularizer/plat/client-server'
 
 const client = new OpenAPIClient(openapi, {
   baseUrl: 'css://dmz/py-hello',

@@ -12,6 +12,7 @@ import { buildCssTargetUrl, normalizeClientApiBaseUrl, normalizeCssTargetUrl, pa
 import { extractOperationsFromOpenApi } from '../runtime/openapiOperations'
 import { invokeOpenApiClientOperation } from '../runtime/openapiInvoke'
 import { inferEntry, useScriptRunnerStore, type RunnerPhase } from './scriptRunner'
+import { lintPortableImports } from '../runtime/portabilityLint'
 import type {
   RuntimeAnalysisSummary,
   LocalRuntimeHandle,
@@ -1332,3 +1333,26 @@ export const useRuntimeStore = create<RuntimeState>()((set, get) => ({
     })
   }
 }
+
+// Portability lint: keep `diagnostics` in sync with workspace files so the
+// Problems panel always reflects non-portable imports.
+{
+  const flagKey = '__browserver_portabilityLintUp'
+  const w = globalThis as Record<string, unknown>
+  if (!w[flagKey]) {
+    w[flagKey] = true
+    const recompute = () => {
+      const files = useWorkspaceStore.getState().files
+      const next = lintPortableImports(files.map((f) => ({ path: f.path, content: f.content })))
+      const prev = useRuntimeStore.getState().diagnostics
+      if (prev.length === next.length && prev.every((d, i) => d.code === next[i].code && d.message === next[i].message && d.line === next[i].line)) return
+      useRuntimeStore.setState({ diagnostics: next })
+    }
+    recompute()
+    useWorkspaceStore.subscribe((state, prev) => {
+      if (state.files === prev.files) return
+      recompute()
+    })
+  }
+}
+

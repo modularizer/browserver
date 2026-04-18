@@ -1,0 +1,33 @@
+
+Choose Your:
+- IDE:
+  - browserver-studio in-browser
+  - a PWA install of browserver-studio
+  - any IDE you want (Intellij, Cursor, VSCode, etc)
+- Language:
+  - TypeScript
+  - Javascript
+  - Python
+  - More to come?
+- Type of page:
+  - static (works, but this solution is probably overkill)
+  - dynamic (this is what browserver is really made for static +  API)
+  - API only
+- Deployment:
+  - self-hosted (on your own server, or a cloud VM)
+  - client-side-server using your open browser tab
+  - future: distributed?? (would rely on other clients to serve it, web3-style. but kinda fails for dbs)
+- Front-end framework:
+  - Vanilla HTML/JS/CSS stack
+  - React
+- Back-end framework:
+  - PLAT (offers the most compatibility and standardized syntax for easy conversion)
+  - express, flask, fastapi will all hopefully get shimmed in the future
+  - Other frameworks can be used IF you do host a real HTTP server
+- Database:
+    - in-browser using custom tools for client-side server
+    - hosted with a 
+- Homepage url:
+  - namespace.$BROWSERVABLE_ORIGIN/
+  - $BROWSERVABLE_ORIGIN/namespace/
+  - any site you can prove you own and control (by making it serve a specific site-viewer shell html)

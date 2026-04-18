@@ -1,4 +1,4 @@
-import { serveClientSideServer } from '@modularizer/plat-client/client-server'
+import { createServer } from '@modularizer/plat'
 
 class MathApi {
   /** Add two numbers and return the sum. */
@@ -21,4 +21,7 @@ class MathApi {
   }
 }
 
-export default serveClientSideServer('dmz/ts-math', [MathApi])
+const server = createServer({ name: 'dmz/ts-math' }, MathApi)
+await server.listen()
+
+export default server

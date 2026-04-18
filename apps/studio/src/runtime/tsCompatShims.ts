@@ -29,7 +29,7 @@ const SHIM_SPECIFIERS = {
   path: ['path', 'node:path'],
   url: ['url', 'node:url'],
   buffer: ['buffer', 'node:buffer'],
-  redis: ['redis'],
+  redis: ['redis', 'fake-redis'],
 } as const
 
 export function collectWorkspaceDotEnv(files: ReadonlyArray<WorkspaceShimFile>, projectId?: string): Record<string, string> {

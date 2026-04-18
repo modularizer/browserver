@@ -1,4 +1,4 @@
-import { serveClientSideServer } from '@modularizer/plat-client/client-server'
+import { createServer } from '@modularizer/plat'
 
 class HelloApi {
   /** Say hello to someone by name. */
@@ -7,4 +7,7 @@ class HelloApi {
   }
 }
 
-export default serveClientSideServer('dmz/ts-hello', [HelloApi])
+const server = createServer({ name: 'dmz/ts-hello' }, HelloApi)
+await server.listen()
+
+export default server

@@ -1,6 +1,7 @@
 import {
   startClientSideServerFromSource,
 } from '@modularizer/plat-client/client-server'
+import * as PlatClientServer from '@modularizer/plat-client/client-server'
 import { evaluateServerAuthorityStatus } from './authorityPolicy'
 import { registerAuthorityHostedServer } from './authorityHost'
 import { buildCssTargetUrl } from './clientTargetUrl'
@@ -20,6 +21,8 @@ type StaticExports = {
     from: (...args: unknown[]) => unknown
   }
 }
+
+import * as PlatStatic from '@modularizer/plat-client/static'
 
 /**
  * If content is a `data:<mime>;base64,<payload>` URL, decode the payload to raw bytes.
@@ -124,6 +127,7 @@ export async function startLocalTsRuntime(options: {
 
   const staticExports = await resolveStaticExports()
   const staticAlias = createStaticAliasModuleUrl(staticExports)
+  const clientServerAlias = createClientServerAliasModuleUrl(PlatClientServer as any)
   const serverConsoleCleanup = installServerConsole()
   const runtimeEnv = buildRuntimeEnvBindings({
     projectId: options.projectId,
@@ -140,7 +144,12 @@ export async function startLocalTsRuntime(options: {
   const rewrittenSource = prependServerConsolePreamble(
     injectRuntimeEnvIntoTsSource(
       rewriteTsCompatImports(
-        rewriteStaticImports(options.source, staticAlias.url),
+        normalizeControllerExports(
+          rewriteStaticImports(options.source, staticAlias.url, clientServerAlias.url),
+          options.serverName,
+          clientServerAlias.url,
+          options.sourceEntryPoint,
+        ),
         compatAliases.specifierMap,
       ),
       effectiveEnv,
@@ -281,6 +290,7 @@ export async function startLocalTsRuntime(options: {
         await (started as any).stop()
       }
       staticAlias.dispose()
+      clientServerAlias.dispose()
       compatAliases.dispose()
       serverConsoleCleanup()
       delete (globalThis as any).__workspaceFiles
@@ -315,19 +325,66 @@ function createStaticAliasModuleUrl(staticExports: StaticExports): { url: string
   }
 }
 
-async function resolveStaticExports(): Promise<StaticExports> {
-  const candidates = [
-    '@modularizer/plat-client/static',
-    '@modularizer/plat/static',
-    '@modularizer/plat-client',
-    '@modularizer/plat',
-  ]
+function createClientServerAliasModuleUrl(exports: Record<string, unknown>): { url: string; dispose(): void } {
+  const registry = ((globalThis as any).__browserverClientServerModuleRegistry ??= new Map<string, Record<string, unknown>>()) as Map<string, Record<string, unknown>>
+  const id = `client-server-${crypto.randomUUID()}`
+  registry.set(id, exports)
 
-  for (const specifier of candidates) {
-    const loaded = await importStaticExportsCandidate(specifier)
-    if (loaded) return loaded
+  const code = [
+    'const __registry = globalThis.__browserverClientServerModuleRegistry',
+    `const __m = __registry?.get(${JSON.stringify(id)})`,
+    `if (!__m) throw new Error('Missing client-server module alias: ${id}')`,
+    // Normalization helpers so plat can always `new` controllers safely
+    'const __isClass = (fn) => typeof fn === "function" && /^class\\s/.test(Function.prototype.toString.call(fn))',
+    'const __toConstructible = (x) => {',
+    '  if (x && __isClass(x)) return x;',
+    '  if (typeof x === "function") {',
+    '    return class { constructor(...args) { return x(...args) } }',
+    '  }',
+    '  if (x && typeof x === "object") {',
+    '    return class { constructor() { return x } }',
+    '  }',
+    '  throw new Error("Invalid controller: expected class/function/object")',
+    '}',
+    'const __normalizeControllersArg = (arg) => {',
+    '  if (!Array.isArray(arg)) return arg;',
+    '  return arg.map(__toConstructible)',
+    '}',
+    // Real exports from plat-client
+    'const __serve = __m.serveClientSideServer ?? __m.serve_client_side_server ?? __m.serveClientSideServerFromSpec ?? __m.serveClientSideServer',
+    'const __startFromSource = __m.startClientSideServerFromSource ?? __m.startClientSideServerFromSource',
+    'const __discover = __m.discoverClientSideServers ?? __m.discoverClientSideServers',
+    'const __OpenAPIClient = __m.OpenAPIClient ?? __m.OpenAPIClient',
+    'const __create = __m.createServer ?? __m.create_server ?? __m.createServer',
+    // Wrapped exports
+    'export function serveClientSideServer(name, controllers, ...rest) {',
+    '  return __serve(name, __normalizeControllersArg(controllers), ...rest)',
+    '}',
+    'export function createServer(opts, controllers, ...rest) {',
+    '  return __create(opts, __normalizeControllersArg(controllers), ...rest)',
+    '}',
+    'export const startClientSideServerFromSource = __startFromSource',
+    'export const discoverClientSideServers = __discover',
+    'export const OpenAPIClient = __OpenAPIClient',
+    'export default {',
+    '  serveClientSideServer, startClientSideServerFromSource, discoverClientSideServers, OpenAPIClient, createServer',
+    '}',
+  ].join('\n')
+
+  const url = URL.createObjectURL(new Blob([code], { type: 'text/javascript' }))
+  return {
+    url,
+    dispose() {
+      registry.delete(id)
+      URL.revokeObjectURL(url)
+    },
   }
+}
 
+async function resolveStaticExports(): Promise<StaticExports> {
+  // Prefer static import so Vite resolves it at build time and our preview doesn't try
+  // to import bare specifiers at runtime.
+  if (hasStaticExports(PlatStatic)) return PlatStatic as unknown as StaticExports
   return createCompatStaticExports()
 }
 
@@ -501,19 +558,77 @@ function guessMimeType(filename: string): string {
   }
 }
 
-function rewriteStaticImports(source: string | Record<string, string>, staticAliasUrl: string): string | Record<string, string> {
+function rewriteStaticImports(source: string | Record<string, string>, staticAliasUrl: string, clientServerAliasUrl: string): string | Record<string, string> {
   const replaceText = (value: string): string => value
     .replaceAll('@modularizer/plat/client-server', '@modularizer/plat-client/client-server')
     .replace(/@modularizer\/plat\/client(?!-)/g, '@modularizer/plat-client')
+    // Static subpath → in-memory alias URL
     .replaceAll("'@modularizer/plat-client/static'", JSON.stringify(staticAliasUrl))
     .replaceAll('"@modularizer/plat-client/static"', JSON.stringify(staticAliasUrl))
     .replaceAll("'@modularizer/plat/static'", JSON.stringify(staticAliasUrl))
     .replaceAll('"@modularizer/plat/static"', JSON.stringify(staticAliasUrl))
     .replaceAll("'plat/static'", JSON.stringify(staticAliasUrl))
     .replaceAll('"plat/static"', JSON.stringify(staticAliasUrl))
+    // Client-server API → in-memory alias URL
+    .replaceAll("'@modularizer/plat-client/client-server'", JSON.stringify(clientServerAliasUrl))
+    .replaceAll('"@modularizer/plat-client/client-server"', JSON.stringify(clientServerAliasUrl))
+    .replaceAll("'@modularizer/plat/client-server'", JSON.stringify(clientServerAliasUrl))
+    .replaceAll('"@modularizer/plat/client-server"', JSON.stringify(clientServerAliasUrl))
+    // Bare package imports → in-memory client-server alias URL
+    .replaceAll("'@modularizer/plat'", JSON.stringify(clientServerAliasUrl))
+    .replaceAll('"@modularizer/plat"', JSON.stringify(clientServerAliasUrl))
+    .replaceAll("'@modularizer/plat-client'", JSON.stringify(clientServerAliasUrl))
+    .replaceAll('"@modularizer/plat-client"', JSON.stringify(clientServerAliasUrl))
 
   if (typeof source === 'string') return replaceText(source)
   return Object.fromEntries(Object.entries(source).map(([path, content]) => [path, replaceText(content)]))
+}
+
+/**
+ * Rewrite common export forms to ensure controllers flow through serveClientSideServer,
+ * which our in-memory alias wraps to normalize non-constructible entries.
+ * Only applies to TS/JS files. Conservative pattern: `export default [ ... ]`.
+ */
+function normalizeControllerExports(
+  source: string | Record<string, string>,
+  serverName: string,
+  clientServerAliasUrl: string,
+  entryPoint?: string,
+): string | Record<string, string> {
+  const tryRewrite = (text: string): string => {
+    // Quick reject for non-code files
+    if (!/\.[cm]?[jt]sx?$/i.test('index.ts')) {
+      // The check above is not on filename; we'll handle by callers per-file.
+    }
+    // Match: export default [ ... ] (array literal possibly spanning lines)
+    const re = /(^|\n)\s*export\s+default\s*\[/m
+    if (!re.test(text)) return text
+    const importLine = `import { serveClientSideServer as __browserverServe } from ${JSON.stringify(clientServerAliasUrl)};\n`
+    // Insert import at top if not already present
+    const withImport = importLine + text
+    return withImport.replace(re, `$1export default __browserverServe(${JSON.stringify(serverName)}, [`)
+  }
+
+  if (typeof source === 'string') return tryRewrite(source)
+
+  // Multi-file: prefer entryPoint if provided; else try index.ts and index.tsx
+  const out: Record<string, string> = { ...source }
+  const candidates = [entryPoint, 'index.ts', 'index.tsx', 'main.ts', 'main.tsx'].filter(Boolean) as string[]
+  for (const name of candidates) {
+    const content = out[name]
+    if (typeof content === 'string') {
+      const next = tryRewrite(content)
+      if (next !== content) { out[name] = next; return out }
+    }
+  }
+  // Fallback: brute-force try all string files
+  for (const [name, content] of Object.entries(out)) {
+    if (!/\.[cm]?[jt]sx?$/i.test(name)) continue
+    if (typeof content !== 'string') continue
+    const next = tryRewrite(content)
+    if (next !== content) { out[name] = next; break }
+  }
+  return out
 }
 
 function injectRuntimeEnvIntoTsSource(

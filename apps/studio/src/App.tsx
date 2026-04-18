@@ -809,7 +809,7 @@ export function App({ initialProjectId, onProjectRouteChange }: AppProps) {
           path: `/${id}/server.ts`,
           language: 'typescript',
           content: [
-            "import { serveClientSideServer } from '@modularizer/plat-client/client-server'",
+            "import { serveClientSideServer } from '@modularizer/plat/client-server'",
             '',
             'class Api {',
             '  async hello() {',

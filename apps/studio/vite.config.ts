@@ -83,7 +83,8 @@ function platClientBundlePlugin() {
       for (const item of items) {
         const full = path.join(dir, item.name)
         if (item.isDirectory()) { await walk(full); continue }
-        if (!item.name.endsWith('.js')) continue
+        // Include both JS bundles and TypeScript declaration files for Monaco typing
+        if (!item.name.endsWith('.js') && !item.name.endsWith('.d.ts') && !item.name.endsWith('.d.mts') && !item.name.endsWith('.d.cts')) continue
         const rel = path.relative(distDir, full).split(path.sep).join('/')
         out.push({ path: `${VFS_ROOT}/${rel}`, contents: await fs.readFile(full, 'utf8') })
       }

@@ -75,6 +75,7 @@ function isBinaryFile(filename: string): boolean {
 const sampleDirs = [
   'ts-hello',
   'ts-math',
+  'ts-counter',
   'ts-static-site',
   'ts-react',
   'ts-react-wordle',
@@ -84,10 +85,10 @@ const sampleDirs = [
 // Text files → ?raw so we get the original source, NOT Vite's transformed
 // module output (which would rewrite imports to /@fs/... and append a
 // sourceMappingURL).  Binary files → ?url so we can fetch() as a blob.
-const textSampleFiles = import.meta.glob('./{ts-hello,ts-math,ts-static-site,ts-react,ts-react-wordle,py-hello}/*', {
+const textSampleFiles = import.meta.glob('./{ts-hello,ts-math,ts-counter,ts-static-site,ts-react,ts-react-wordle,py-hello}/*', {
   query: '?raw', import: 'default', eager: true,
 }) as Record<string, string>
-const binarySampleFiles = import.meta.glob('./{ts-hello,ts-math,ts-static-site,ts-react,ts-react-wordle,py-hello}/*', {
+const binarySampleFiles = import.meta.glob('./{ts-hello,ts-math,ts-counter,ts-static-site,ts-react,ts-react-wordle,py-hello}/*', {
   query: '?url', import: 'default', eager: true,
 }) as Record<string, string>
 
@@ -114,6 +115,11 @@ const sampleMeta: Record<string, { name: string, description: string, serverLang
   'ts-math': {
     name: 'Math (TypeScript)',
     description: 'Arithmetic server with add, multiply, and factorial.',
+    serverLanguage: 'typescript',
+  },
+  'ts-counter': {
+    name: 'Counter (TypeScript + Redis)',
+    description: 'Persistent counter using the bare `redis` import, backed by a localStorage-based shim in the browser.',
     serverLanguage: 'typescript',
   },
   'ts-static-site': {

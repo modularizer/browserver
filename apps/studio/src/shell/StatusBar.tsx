@@ -17,6 +17,8 @@ export function StatusBar() {
   const activeEditorPane = useWorkspaceStore((state) => state.activeEditorPane)
   const sampleId = useWorkspaceStore((state) => state.sample.id)
   const setActiveBottomPanel = useWorkspaceStore((state) => state.setActiveBottomPanel)
+  const importView = useWorkspaceStore((state) => state.importView)
+  const setImportView = useWorkspaceStore((state) => state.setImportView)
   const runtimeLanguage = useRuntimeStore((state) => state.language)
   const runtimeStatus = useRuntimeStore((state) => state.status)
   const launchable = useRuntimeStore((state) => state.launchable)
@@ -39,6 +41,13 @@ export function StatusBar() {
 
   return (
     <div className="flex-none h-[22px] flex items-center px-2 text-[10px] bg-bs-accent text-bs-accent-text gap-3">
+      <button
+        title={`Imports are in ${importView} form. Click to rewrite every text file into ${importView === 'browser' ? 'server' : 'browser'} form and save the preference to .browserver.yaml.`}
+        onClick={() => setImportView(importView === 'browser' ? 'server' : 'browser')}
+        className="px-1.5 py-0.5 rounded border border-bs-accent-text/40 bg-bs-accent-text/10 hover:bg-bs-accent-text/20 font-semibold"
+      >
+        imports: {importView}
+      </button>
       <span className="font-medium">{sample.name}</span>
       <span className="opacity-70">{activeFile?.name ?? 'no file'}</span>
       <span className="opacity-70">{activeFile?.language ?? 'n/a'}</span>

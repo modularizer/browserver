@@ -71,216 +71,14 @@ export function setupPackageJsonCodeLens() {
 }
 
 const packageDeclarations = `
-declare module '@modularizer/plat-client/client-server' {
-  export type ControllerClass = new () => any
-
-  export interface ClientSideServerDefinition {
-    serverName: string
-    controllers: ControllerClass[]
-  }
-
-  export interface StartedClientSideServer {
-    server: unknown
-    signaler: unknown
-    connectionUrl: string
-    openapi: Record<string, any>
-    stop(): Promise<void>
-  }
-
-  export class OpenAPIClient {
-    constructor(openapi: Record<string, any>, options: { baseUrl: string })
-    [key: string]: any
-  }
-
-   export function serveClientSideServer(
-     serverName: string,
-     controllers: ControllerClass[],
-   ): ClientSideServerDefinition
-
-   export function startClientSideServerFromSource(options: {
-     source: string | Record<string, string>
-     serverName?: string
-     sourceEntryPoint?: string
-     transpile?: (source: string | Record<string, string>, entryPoint?: string) => string | Promise<string>
-     onRequest?: (direction: 'request' | 'response', payload: unknown) => void
-   }): Promise<StartedClientSideServer>
-   
-   export function runClientSideServer(
-     source: string,
-     options?: { serverName?: string; undecoratedMode?: 'GET' | 'POST' | 'private' }
-   ): Promise<StartedClientSideServer>
-   
-   export function runClientSideServer(
-     source: Record<string, string>,
-     options?: { serverName?: string; undecoratedMode?: 'GET' | 'POST' | 'private'; sourceEntryPoint?: string }
-   ): Promise<StartedClientSideServer>
-
-   export function connectClientSideServer(options: {
-     baseUrl: string
-     [key: string]: any
-   }): Promise<{ client: OpenAPIClient; openapi: Record<string, any> }>
-
-   export const connectServer: typeof connectClientSideServer
- }
-
- declare module '@modularizer/plat-client/client-server' {
-  export type ControllerClass = new () => any
-
-  export interface ClientSideServerDefinition {
-    serverName: string
-    controllers: ControllerClass[]
-  }
-
-  export interface StartedClientSideServer {
-    server: unknown
-    signaler: unknown
-    connectionUrl: string
-    openapi: Record<string, any>
-    stop(): Promise<void>
-  }
-
-  export class OpenAPIClient {
-    constructor(openapi: Record<string, any>, options: { baseUrl: string })
-    [key: string]: any
-  }
-
-   export function serveClientSideServer(
-     serverName: string,
-     controllers: ControllerClass[],
-   ): ClientSideServerDefinition
-
-   export function startClientSideServerFromSource(options: {
-     source: string | Record<string, string>
-     serverName?: string
-     sourceEntryPoint?: string
-     transpile?: (source: string | Record<string, string>, entryPoint?: string) => string | Promise<string>
-     onRequest?: (direction: 'request' | 'response', payload: unknown) => void
-   }): Promise<StartedClientSideServer>
-   
-   export function runClientSideServer(
-     source: string,
-     options?: { serverName?: string; undecoratedMode?: 'GET' | 'POST' | 'private' }
-   ): Promise<StartedClientSideServer>
-   
-   export function runClientSideServer(
-     source: Record<string, string>,
-     options?: { serverName?: string; undecoratedMode?: 'GET' | 'POST' | 'private'; sourceEntryPoint?: string }
-   ): Promise<StartedClientSideServer>
-
-   export function connectClientSideServer(options: {
-     baseUrl: string
-     [key: string]: any
-   }): Promise<{ client: OpenAPIClient; openapi: Record<string, any> }>
-
-   export const connectServer: typeof connectClientSideServer
-
-   export interface ClientSideServerChannel {
-     send(message: unknown): void | Promise<void>
-     subscribe(listener: (message: unknown) => void | Promise<void>): () => void
-     close?(): void | Promise<void>
-   }
-
-   export interface PlatFetchOptions {
-     channel: ClientSideServerChannel
-     interceptBase?: string
-   }
-
-   export function createPlatFetch(options: PlatFetchOptions): typeof globalThis.fetch
-   export function patchGlobalFetch(options: PlatFetchOptions): () => void
-   export function generateBridgeScript(): string
- }
-
- declare module '@modularizer/plat-client' {
-  export class OpenAPIClient {
-    constructor(openapi: Record<string, any>, options: { baseUrl: string })
-    [key: string]: any
-  }
-}
-
-declare module '@modularizer/plat-client/python-browser' {
-  export interface PythonBrowserRuntime {
-    startServer(source: string): Promise<{
-      server_name: string
-      openapi: Record<string, any>
-    }>
-    handleRequest(message: Record<string, any>): Promise<{
-      result: unknown
-      events: Array<{ event: string; data: unknown }>
-    }>
-    dispose(): Promise<void>
-  }
-
-  export function createPythonBrowserRuntime(options?: {
-    pythonRuntimeUrl?: string
-  }): Promise<PythonBrowserRuntime>
-
-  export function formatPythonBrowserValue(value: unknown): string
-}
+// Note: No @modularizer/plat-client types here. Real types are injected at runtime via
+// the virtual:plat-client-bundle Vite plugin in setupMonacoTypeEnvironment().
 
 declare module 'plat' {
   export function serve_client_side_server(
     serverName: string,
     controllers: unknown[],
   ): unknown
-}
-
-declare module '@modularizer/plat-client/static' {
-  export interface FileResponseOpts {
-    contentType?: string
-    maxAge?: number
-    headers?: Record<string, string>
-  }
-
-  export class FileResponse {
-    readonly kind: 'path' | 'content'
-    readonly source: string | Uint8Array
-    readonly filename: string
-    readonly contentType: string
-    readonly maxAge?: number
-    readonly headers: Record<string, string>
-    static from(path: string): FileResponse
-    static from(content: string | Uint8Array, filename: string, opts?: FileResponseOpts): FileResponse
-    getContent(): Promise<string | Uint8Array>
-  }
-
-  export function isFileResponse(value: unknown): value is FileResponse
-
-  export interface StaticFolderOpts {
-    exclude?: string[]
-    maxAge?: number
-    headers?: Record<string, string>
-    dotfiles?: 'ignore' | 'allow' | 'deny'
-    onDirectory?: 'none' | 'index' | 'list' | 'directory' | ((files: string[]) => FileResponse | Promise<FileResponse>)
-    index?: string
-  }
-
-  export interface VirtualFileSystem {
-    list(path: string): string[] | Promise<string[]>
-    read(path: string): string | Uint8Array | null | Promise<string | Uint8Array | null>
-  }
-
-  export type MemoryFileEntry = string | Uint8Array | { read(): string | Uint8Array | Promise<string | Uint8Array> }
-
-  export class MemoryFileSystem implements VirtualFileSystem {
-    constructor(files: Record<string, MemoryFileEntry>)
-    list(path: string): string[]
-    read(path: string): string | Uint8Array | null
-  }
-
-  export class StaticFolder {
-    constructor(directory: string, opts?: StaticFolderOpts)
-    constructor(files: Record<string, MemoryFileEntry>, opts?: StaticFolderOpts)
-    constructor(vfs: VirtualFileSystem, opts?: StaticFolderOpts)
-    resolve(subPath: string): Promise<FileResponse | null>
-  }
-
-  export function isStaticFolder(value: unknown): value is StaticFolder
-  export function getMimeType(filename: string): string
-  export function isExcluded(path: string, patterns: string[]): boolean
-}
-
-declare module '@modularizer/plat/static' {
-  export * from '@modularizer/plat-client/static'
 }
 
 /** Workspace files injected by browserver at runtime, usable with StaticFolder */
@@ -532,10 +330,87 @@ export function setupMonacoTypeEnvironment() {
 
   tsLanguage.typescriptDefaults.setEagerModelSync(true)
   tsLanguage.javascriptDefaults.setEagerModelSync(true)
-  tsLanguage.typescriptDefaults.addExtraLib(
-    packageDeclarations,
-    'file:///browserver-packages.d.ts',
-  )
+
+
+  // Attempt to load real .d.ts from the installed @modularizer/plat-client package via the
+  // virtual bundle provided by the Vite plugin. No ambient-module hacks; we mirror a node_modules layout.
+  ;(async () => {
+    try {
+      const mod = await import('virtual:plat-client-bundle')
+      const files: Array<{ path: string; contents: string }> = (mod as any).files || []
+      const aliases: Record<string, string> = (mod as any).aliases || {}
+      const dtsFiles = files.filter((f) => {
+        if (!f || typeof f.path !== 'string') return false
+        return f.path.endsWith('.d.ts') || f.path.endsWith('.d.mts') || f.path.endsWith('.d.cts')
+      })
+      const toFileUrl = (p: string) => `file://${p.startsWith('/') ? p : '/' + p}`
+      // Register all real declaration files so they are available by absolute URL
+      for (const f of dtsFiles) {
+        const url = toFileUrl(f.path)
+        tsLanguage.typescriptDefaults.addExtraLib(f.contents, url)
+      }
+      if (dtsFiles.length) {
+        const dtsSet = new Set(dtsFiles.map((f) => f.path.replace(/\\/g, '/')))
+        // For each alias (package subpath), create a proper index.d.ts file under a virtual node_modules tree
+        // This mirrors standard Node/TS resolution and avoids ambient declare-module hacks.
+        let created = 0
+        const pathsMap: Record<string, string[]> = {}
+        const createIndexFor = (spec: string, targetPath: string) => {
+          const specDir = `file:///node_modules/${spec}`.replace(/\\/g, '/')
+          const filePath = `${specDir}/index.d.ts`
+          const content = `export * from '${toFileUrl(targetPath)}';\nexport { default } from '${toFileUrl(targetPath)}';\n`
+          tsLanguage.typescriptDefaults.addExtraLib(content, filePath)
+          pathsMap[spec] = [filePath]
+          created++
+        }
+        for (const [spec, jsPath] of Object.entries(aliases)) {
+          const js = (jsPath || '').replace(/\\/g, '/')
+          const candidates = [
+            js.replace(/\.js$/i, '.d.ts'),
+            js.replace(/\.js$/i, '.d.mts'),
+            js.replace(/\.js$/i, '.d.cts'),
+            js.endsWith('/index.js') ? js.slice(0, -3) + 'd.ts' : js,
+          ].filter((p, i, arr) => typeof p === 'string' && p !== js && arr.indexOf(p) === i)
+          const target = candidates.find((p) => dtsSet.has(p))
+          if (target) createIndexFor(spec, target)
+        }
+        // Optional legacy compatibility by providing real files under legacy package path
+        const legacySpecs: Array<[string, string]> = [
+          ['@modularizer/plat/client', '@modularizer/plat-client'],
+          ['@modularizer/plat/client-server', '@modularizer/plat-client/client-server'],
+        ]
+        for (const [legacy, modern] of legacySpecs) {
+          const modernJs = aliases[modern]
+          if (!modernJs) continue
+          const js = modernJs.replace(/\\/g, '/')
+          const candidates = [
+            js.replace(/\.js$/i, '.d.ts'),
+            js.replace(/\.js$/i, '.d.mts'),
+            js.replace(/\.js$/i, '.d.cts'),
+            js.endsWith('/index.js') ? js.slice(0, -3) + 'd.ts' : js,
+          ].filter((p, i, arr) => typeof p === 'string' && p !== js && arr.indexOf(p) === i)
+          const target = candidates.find((p) => dtsSet.has(p))
+          if (target) {
+            const specDir = `file:///node_modules/${legacy}`
+            const filePath = `${specDir}/index.d.ts`
+            const content = `export * from '${toFileUrl(target)}';\nexport { default } from '${toFileUrl(target)}';\n`
+            tsLanguage.typescriptDefaults.addExtraLib(content, filePath)
+            pathsMap[legacy] = [filePath]
+            created++
+          }
+        }
+        // Update TS compiler options to point module specifiers to our virtual node_modules entries
+        const current = compilerOptions as any
+        tsLanguage.typescriptDefaults.setCompilerOptions({ ...current, baseUrl: '/', paths: { ...(current.paths || {}), ...pathsMap } })
+        console.info(`[browserver] Monaco typings: loaded ${dtsFiles.length} declaration file(s) from @modularizer/plat-client and created ${created} virtual node_modules index.d.ts file(s).`)
+      } else {
+        console.warn('[browserver] Monaco typings: no declaration files found in @modularizer/plat-client dist; Monaco will report missing modules until declarations exist.')
+      }
+    } catch (err) {
+      console.warn('[browserver] Monaco typings: virtual:plat-client-bundle not available; only generic environment typings applied.', err)
+    }
+  })()
+
   tsLanguage.typescriptDefaults.addExtraLib(
     reactTypeStubs,
     'file:///react-stubs.d.ts',

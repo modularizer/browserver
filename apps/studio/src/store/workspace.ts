@@ -11,6 +11,7 @@ import { samplesPromise, type Sample, type SampleFile } from '../samples'
 import { useHistoryStore } from './history'
 import { useLayoutStore } from './layout'
 import { useThemeStore } from '../theme'
+import { toBrowserText, toServerText } from '../runtime/portabilityConvert'
 
 export interface WorkspaceFile extends StoredWorkspaceFile {
   name: string
@@ -92,6 +93,14 @@ interface WorkspaceState {
   viewTitles: Record<string, string>
   renamingPath: string | null
   renamingFolderPath: string | null
+  /**
+   * Which import-specifier form the IDE should present to the user. Stored
+   * authoritatively in `.browserver.yaml` per-project; defaults to `browser`.
+   * Toggling this via `setImportView` rewrites every text file in the
+   * workspace to the chosen form.
+   */
+  importView: 'browser' | 'server'
+  setImportView: (view: 'browser' | 'server') => void
   editorSession: () => WorkspaceEditorSession
   hydrate: (preferredId?: string) => Promise<boolean>
   setSample: (id: string) => Promise<void>
@@ -877,6 +886,38 @@ function persistActiveWorkspaceId(id: string) {
   window.localStorage.setItem(ACTIVE_WORKSPACE_KEY, id)
 }
 
+/**
+ * Extract the `importView` preference from a workspace's `.browserver.yaml`
+ * file if present, else default to `browser`. Also returns the file-list with
+ * every text file already converted to that form so the IDE and the yaml
+ * agree the moment hydration finishes.
+ */
+function applyImportViewFromYaml(files: WorkspaceFile[]): {
+  importView: 'browser' | 'server'
+  files: WorkspaceFile[]
+} {
+  const yamlFile = files.find((f) => f.path.endsWith('.browserver.yaml'))
+  let importView: 'browser' | 'server' = 'browser'
+  if (yamlFile && typeof yamlFile.content === 'string') {
+    try {
+      const parsed = parseBrowserYaml(yamlFile.content)
+      if (parsed.importView === 'browser' || parsed.importView === 'server') {
+        importView = parsed.importView
+      }
+    } catch { /* treat as default */ }
+  }
+  const convert = importView === 'browser' ? toBrowserText : toServerText
+  const now = Date.now()
+  const converted = files.map((file) => {
+    if (file.path.endsWith('.browserver.yaml')) return file
+    if (typeof file.content !== 'string') return file
+    const next = convert(file.content)
+    if (next === file.content) return file
+    return { ...file, content: next, updatedAt: now }
+  })
+  return { importView, files: converted }
+}
+
 function createEmptyPaneTabs(): EditorPaneTabState {
   return {
     primary: { tabs: [], activePath: null },
@@ -1024,10 +1065,12 @@ function buildBrowserYaml(
   layout: { sidebarWidth: number; bottomHeight: number; rightWidth: number; showSidebar: boolean; showBottom: boolean; showRight: boolean },
   session: WorkspaceEditorSession & { activePanel?: WorkbenchPanelId },
   runtime?: BrowserYamlRuntime,
+  importView: 'browser' | 'server' = 'browser',
 ): string {
   const lines: string[] = []
   lines.push('# browserver UI state')
   lines.push(`theme: ${themeId}`)
+  lines.push(`importView: ${importView}`)
   lines.push('layout:')
   lines.push(`  sidebarWidth: ${Math.round(layout.sidebarWidth)}`)
   lines.push(`  bottomHeight: ${Math.round(layout.bottomHeight)}`)
@@ -1102,6 +1145,10 @@ export function parseBrowserYaml(content: string): any {
         currentSection = 'runtime';
       } else if (key === 'activePanel') {
         result.activePanel = value;
+      } else if (key === 'importView') {
+        if (value === 'browser' || value === 'server') {
+          result.importView = value;
+        }
       } else if (key === 'activeBottomPanel') {
         result.activeBottomPanel = value;
       } else if (key === 'activeRightPanelTab') {
@@ -1184,7 +1231,7 @@ export const useWorkspaceStore = create<WorkspaceState>()((set, get) => ({
       showSidebar: layout.showSidebar,
       showBottom: layout.showBottom,
       showRight: layout.showRight,
-    }, { ...session, activePanel: state.activePanel }, runtimeInfo)
+    }, { ...session, activePanel: state.activePanel }, runtimeInfo, state.importView)
     
     const sampleFileName = '.browserver.yaml'
     const existing = state.files.find((f) => f.path === path)
@@ -1236,6 +1283,32 @@ export const useWorkspaceStore = create<WorkspaceState>()((set, get) => ({
   viewTitles: {},
   renamingPath: null,
   renamingFolderPath: null,
+  importView: 'browser',
+  setImportView: (view) => {
+    const state = get()
+    if (state.importView === view) return
+    const convert = view === 'browser' ? toBrowserText : toServerText
+    const now = Date.now()
+    const files = state.files.map((file) => {
+      if (file.path.endsWith('.browserver.yaml')) return file
+      if (typeof file.content !== 'string') return file
+      const next = convert(file.content)
+      if (next === file.content) return file
+      return { ...file, content: next, updatedAt: now }
+    })
+    const sample = {
+      ...state.sample,
+      files: state.sample.files.map((sampleFile) => {
+        if (sampleFile.name.endsWith('.browserver.yaml')) return sampleFile
+        if (typeof sampleFile.content !== 'string') return sampleFile
+        const next = convert(sampleFile.content)
+        if (next === sampleFile.content) return sampleFile
+        return { ...sampleFile, content: next }
+      }),
+    }
+    set({ importView: view, files, sample })
+    get().syncBrowserYaml()
+  },
   editorSession: () => {
     const state = get()
     return {
@@ -1265,7 +1338,9 @@ export const useWorkspaceStore = create<WorkspaceState>()((set, get) => ({
       }
     }
 
-    const { sample, files } = await loadSampleWorkspace(resolvedPreferredId)
+    const loaded = await loadSampleWorkspace(resolvedPreferredId)
+    const sample = loaded.sample
+    const { importView, files } = applyImportViewFromYaml(loaded.files)
     const session = loadWorkspaceUiState(sample.id, files)
 
     set({
@@ -1283,6 +1358,7 @@ export const useWorkspaceStore = create<WorkspaceState>()((set, get) => ({
       activeBottomPanel: session.activeBottomPanel,
       activeRightPanelTab: session.activeRightPanelTab,
       viewTitles: session.viewTitles ?? {},
+      importView,
     })
     if (!explicitPreferredId || matchedExplicitRoute) {
       persistActiveWorkspaceId(sample.id)
@@ -1291,7 +1367,9 @@ export const useWorkspaceStore = create<WorkspaceState>()((set, get) => ({
   },
   setSample: async (id: string) => {
     await ensureSamplesLoaded()
-    const { sample, files } = await loadSampleWorkspace(id)
+    const loaded = await loadSampleWorkspace(id)
+    const sample = loaded.sample
+    const { importView, files } = applyImportViewFromYaml(loaded.files)
     const session = loadWorkspaceUiState(sample.id, files)
 
     set({
@@ -1309,17 +1387,19 @@ export const useWorkspaceStore = create<WorkspaceState>()((set, get) => ({
       activeRightPanelTab: session.activeRightPanelTab,
       viewTitles: session.viewTitles ?? {},
       activePanel: 'editor',
+      importView,
     })
     persistActiveWorkspaceId(sample.id)
   },
   importSnapshot: async (snapshot) => {
     await ensureSamplesLoaded()
     await saveWorkspaceSnapshot(snapshot)
-    const files = snapshotToFiles(snapshot)
+    const rawFiles = snapshotToFiles(snapshot)
     const seedSample = SAMPLES.find((entry) => entry.id === snapshot.id)
     const sample = seedSample
       ? buildSampleFromSnapshot(seedSample, snapshot)
       : buildImportedSample(snapshot)
+    const { importView, files } = applyImportViewFromYaml(rawFiles)
 
     const session = loadWorkspaceUiState(sample.id, files)
     set({
@@ -1338,6 +1418,7 @@ export const useWorkspaceStore = create<WorkspaceState>()((set, get) => ({
       activeRightPanelTab: session.activeRightPanelTab,
       viewTitles: session.viewTitles ?? {},
       activePanel: 'editor',
+      importView,
     })
     persistActiveWorkspaceId(sample.id)
   },
