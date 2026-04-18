@@ -24,8 +24,16 @@ export function setupPackageJsonCodeLens() {
         path: f.path.startsWith('/') ? f.path : '/' + f.path,
         contents: f.content as string,
       }))
-    const entry = inferEntry(files)
-    void useScriptRunnerStore.getState().runScript({ name, command, kind }, files, entry)
+    // Find the package.json file path for this model
+    const uri = monaco.editor.getModels().find(m => m.getValue() === (monaco.editor.getModel(_accessor.get('resource'))?.getValue() ?? ''))?.uri.toString()
+    // Fallback: try to find the first package.json in files
+    let ownerPath: string | undefined = files.find(f => f.path.endsWith('package.json'))?.path
+    if (uri && uri.startsWith('file://')) {
+      const filePath = uri.replace('file://', '')
+      if (files.some(f => f.path === filePath)) ownerPath = filePath
+    }
+    const entry = inferEntry(files, ownerPath)
+    void useScriptRunnerStore.getState().runScript({ name, command, kind }, files, entry, ownerPath)
     // Make sure the Build tab is visible so user sees output
     useWorkspaceStore.getState().setActiveBottomPanel?.('build')
   })

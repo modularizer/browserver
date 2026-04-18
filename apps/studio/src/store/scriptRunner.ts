@@ -189,6 +189,68 @@ function collectServerSource(projectId: string | undefined): Record<string, stri
   return out
 }
 
+function filesInOwnerPackage(files: BundlerFile[], ownerPath: string): BundlerFile[] {
+  const packageDir = ownerPath.replace(/\/package\.json$/i, '')
+  const packageJson = files.find((file) => file.path === ownerPath)
+  const explicitEntry = packageJson ? getBrowserverEntryFromPackageJson(packageJson.contents, packageDir) : null
+  if (explicitEntry) {
+    const matching = files.find((file) => file.path === explicitEntry)
+    if (matching) return [matching, ...files.filter((file) => file.path !== explicitEntry)]
+  }
+
+  if (!packageDir) return files
+  const prefix = `${packageDir}/`
+  return files
+    .filter((file) => file.path.startsWith(prefix))
+    .map((file) => ({ ...file, path: file.path.slice(packageDir.length) || '/' }))
+}
+
+function inferEntryFromCandidates(files: BundlerFile[]): string | null {
+  const candidates = ['/index.tsx', '/index.ts', '/index.jsx', '/index.js', '/src/main.tsx', '/src/index.tsx', '/main.tsx']
+  for (const c of candidates) if (files.some((f) => f.path === c)) return c
+  return files.find((f) => f.path.endsWith('.tsx'))?.path ?? null
+}
+
+function getBrowserverEntryFromPackageJson(contents: string, packageDir: string): string | null {
+  try {
+    const parsed = JSON.parse(contents) as { browserver?: { entry?: unknown } }
+    const entry = parsed?.browserver?.entry
+    if (typeof entry !== 'string' || !entry.trim()) return null
+    const normalized = entry.trim().replace(/^\.?\//, '')
+    return `${packageDir}/${normalized.startsWith('/') ? normalized.slice(1) : normalized}`
+  } catch {
+    return null
+  }
+}
+
+export function inferEntry(files: BundlerFile[], ownerPath?: string): string | null {
+  const scopedFiles = ownerPath ? filesInOwnerPackage(files, ownerPath) : files
+  const preferred = inferEntryFromCandidates(scopedFiles)
+  if (preferred) return preferred
+
+  if (scopedFiles !== files) {
+    const fallback = inferEntryFromCandidates(files)
+    if (fallback) return fallback
+  }
+
+  return null
+}
+
+export function classifyScript(command: string): ScriptKind {
+  const c = command.trim()
+  if (/\bvite\s+build\b/.test(c) || /\btsc\b/.test(c) || /\besbuild\b.*--bundle/.test(c)) return 'build'
+  if (/^vite(\s|$)/.test(c) || /\bnext\s+dev\b/.test(c) || /\bvite\s+dev\b/.test(c) || /bundler\s+dev/.test(c)) return 'dev'
+  if (/\bvite\s+preview\b/.test(c) || /\bnext\s+start\b/.test(c) || /\bserve\b/.test(c) || /bundler\s+start/.test(c)) return 'start'
+  return 'unknown'
+}
+
+export function inferScriptKindByName(name: string): ScriptKind {
+  if (name === 'build') return 'build'
+  if (name === 'dev' || name === 'watch') return 'dev'
+  if (name === 'start' || name === 'preview' || name === 'serve') return 'start'
+  return 'unknown'
+}
+
 export const useScriptRunnerStore = create<ScriptRunnerState>((set, get) => ({
   phase: 'idle',
   scriptName: null,
@@ -232,6 +294,7 @@ export const useScriptRunnerStore = create<ScriptRunnerState>((set, get) => ({
 
   runScript: async (script, files, entry, ownerPath) => {
     const ownerPatch = ownerPath !== undefined ? { ownerPath } : {}
+    console.debug('[scriptRunner] runScript called', { script, entry, ownerPath, phase: get().phase })
     if (script.kind === 'start') {
       if (runtimeHandle) {
         set({ ...ownerPatch, phase: 'ok', scriptName: script.name, message: 'serving last build', errors: [] })
@@ -271,11 +334,6 @@ export const useScriptRunnerStore = create<ScriptRunnerState>((set, get) => ({
         if (buildSeq === seq) set({ phase: 'building', message: 'compiling…' })
       })
     }
-    // PATCH: Force IIFE output to avoid ESM export syntax in preview server
-    // Pass globalName to ensure esbuild emits a true IIFE bundle.
-    // Prepend the local plat-client dist as VFS entries + alias map so bare
-    // imports of `@modularizer/plat-client` resolve to the checkout in this
-    // repo instead of going through esm.sh.
     const res = await b.build({
       files: [...platClientFiles, ...files],
       entry,
@@ -306,6 +364,7 @@ export const useScriptRunnerStore = create<ScriptRunnerState>((set, get) => ({
     await stopRuntime()
     try {
       const serverSource = collectServerSource(projectId)
+      console.debug('[scriptRunner] starting local runtime', { serverNameForRun, projectId, phase: get().phase })
       const handle = await startLocalTsRuntime({
         source: serverSource ?? buildServerSource(html, serverNameForRun),
         sourceEntryPoint: serverSource ? 'index.ts' : undefined,
@@ -320,6 +379,7 @@ export const useScriptRunnerStore = create<ScriptRunnerState>((set, get) => ({
       runtimeHandle = handle
       const viewerUrl = buildSiteViewerUrl(handle.serverName)
       set({
+        ...ownerPatch,
         phase: 'ok',
         scriptName: script.name,
         serverName: handle.serverName,
@@ -330,6 +390,7 @@ export const useScriptRunnerStore = create<ScriptRunnerState>((set, get) => ({
         errors: [],
         message: `built in ${Math.round(res.durationMs)}ms`,
       })
+      console.debug('[scriptRunner] runtime started', { serverName: handle.serverName, connectionUrl: handle.connectionUrl, phase: get().phase })
 
       if (script.kind === 'dev') {
         let lastFilesRef = useWorkspaceStore.getState().files
@@ -342,13 +403,14 @@ export const useScriptRunnerStore = create<ScriptRunnerState>((set, get) => ({
             const nextFiles = filesFromWorkspace()
             const nextOwnerPath = get().ownerPath ?? ownerPath
             const nextEntry = inferEntry(nextFiles, nextOwnerPath ?? undefined)
+            console.debug('[scriptRunner] dev watcher restart', { nextOwnerPath, nextEntry })
             void get().runScript(script, nextFiles, nextEntry, nextOwnerPath ?? undefined)
           }, 150)
         })
       }
     } catch (err: any) {
       if (seq !== buildSeq) return
-        console.error(err)
+      console.error(err)
       set({
         phase: 'error',
         scriptName: script.name,
@@ -361,65 +423,3 @@ export const useScriptRunnerStore = create<ScriptRunnerState>((set, get) => ({
     }
   },
 }))
-
-export function classifyScript(command: string): ScriptKind {
-  const c = command.trim()
-  if (/\bvite\s+build\b/.test(c) || /\btsc\b/.test(c) || /\besbuild\b.*--bundle/.test(c)) return 'build'
-  if (/^vite(\s|$)/.test(c) || /\bnext\s+dev\b/.test(c) || /\bvite\s+dev\b/.test(c) || /bundler\s+dev/.test(c)) return 'dev'
-  if (/\bvite\s+preview\b/.test(c) || /\bnext\s+start\b/.test(c) || /\bserve\b/.test(c) || /bundler\s+start/.test(c)) return 'start'
-  return 'unknown'
-}
-
-export function inferScriptKindByName(name: string): ScriptKind {
-  if (name === 'build') return 'build'
-  if (name === 'dev' || name === 'watch') return 'dev'
-  if (name === 'start' || name === 'preview' || name === 'serve') return 'start'
-  return 'unknown'
-}
-
-export function inferEntry(files: BundlerFile[], ownerPath?: string): string | null {
-  const scopedFiles = ownerPath ? filesInOwnerPackage(files, ownerPath) : files
-  const preferred = inferEntryFromCandidates(scopedFiles)
-  if (preferred) return preferred
-
-  if (scopedFiles !== files) {
-    const fallback = inferEntryFromCandidates(files)
-    if (fallback) return fallback
-  }
-
-  return null
-}
-
-function inferEntryFromCandidates(files: BundlerFile[]): string | null {
-  const candidates = ['/index.tsx', '/index.ts', '/index.jsx', '/index.js', '/src/main.tsx', '/src/index.tsx', '/main.tsx']
-  for (const c of candidates) if (files.some((f) => f.path === c)) return c
-  return files.find((f) => f.path.endsWith('.tsx'))?.path ?? null
-}
-
-function filesInOwnerPackage(files: BundlerFile[], ownerPath: string): BundlerFile[] {
-  const packageDir = ownerPath.replace(/\/package\.json$/i, '')
-  const packageJson = files.find((file) => file.path === ownerPath)
-  const explicitEntry = packageJson ? getBrowserverEntryFromPackageJson(packageJson.contents, packageDir) : null
-  if (explicitEntry) {
-    const matching = files.find((file) => file.path === explicitEntry)
-    if (matching) return [matching, ...files.filter((file) => file.path !== explicitEntry)]
-  }
-
-  if (!packageDir) return files
-  const prefix = `${packageDir}/`
-  return files
-    .filter((file) => file.path.startsWith(prefix))
-    .map((file) => ({ ...file, path: file.path.slice(packageDir.length) || '/' }))
-}
-
-function getBrowserverEntryFromPackageJson(contents: string, packageDir: string): string | null {
-  try {
-    const parsed = JSON.parse(contents) as { browserver?: { entry?: unknown } }
-    const entry = parsed?.browserver?.entry
-    if (typeof entry !== 'string' || !entry.trim()) return null
-    const normalized = entry.trim().replace(/^\.?\//, '')
-    return `${packageDir}/${normalized.startsWith('/') ? normalized.slice(1) : normalized}`
-  } catch {
-    return null
-  }
-}

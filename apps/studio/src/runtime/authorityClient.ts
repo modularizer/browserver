@@ -1,9 +1,23 @@
-export interface OAuthExchangeResult {
+export class AuthorityUnavailableError extends Error {
+  constructor(message = 'Authority integration is not configured. Set VITE_AUTHORITY_URL to enable sign-in and namespaces.') {
+    super(message)
+    this.name = 'AuthorityUnavailableError'
+  }
+}
+export interface AuthSessionProfile {
   sub: string
   email?: string
   name?: string
   picture?: string
-  id_token?: string
+}
+
+export interface AuthSessionResult {
+  ok: true
+  session_token: string
+  google_sub: string
+  roles: string[]
+  profile: AuthSessionProfile
+  picture_data?: string
 }
 
 export interface ApprovedNamespace {
@@ -26,9 +40,7 @@ export interface AuthorityClientError extends Error {
 function getAuthorityUrl(): string {
   const configured = import.meta.env.VITE_AUTHORITY_URL
   if (typeof configured !== 'string' || !configured.trim()) {
-    throw Object.assign(new Error('Authority integration is not configured. Set VITE_AUTHORITY_URL to enable sign-in and namespaces.'), {
-      status: 0,
-    } satisfies Partial<AuthorityClientError>)
+    throw new AuthorityUnavailableError()
   }
   return configured.replace(/\/+$/, '')
 }
@@ -94,14 +106,10 @@ function authedRequestJson<T>(token: string, path: string, init?: RequestInit): 
   })
 }
 
-export function getOAuthStartUrl(redirectUri: string): string {
-  return `${getAuthorityUrl()}/oauthStart${toQuery({ redirect_uri: redirectUri })}`
-}
-
-export async function oauthExchange(grantId: string): Promise<OAuthExchangeResult> {
-  return requestJson<OAuthExchangeResult>('/oauthExchange', {
+export async function authSession(idToken: string, role: 'admin' | 'user' = 'user'): Promise<AuthSessionResult> {
+  return requestJson<AuthSessionResult>('/authSession', {
     method: 'POST',
-    body: JSON.stringify({ grant_id: grantId }),
+    body: JSON.stringify({ id_token: idToken, role }),
   })
 }
 

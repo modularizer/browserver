@@ -1,5 +1,5 @@
-import fs from 'node:fs/promises'
-import path from 'node:path'
+import * as fs from 'node:fs/promises'
+import * as path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import react from '@vitejs/plugin-react'
 import { defineConfig } from 'vite'
@@ -100,9 +100,13 @@ function platClientBundlePlugin() {
     async configResolved() {
       // Resolve the package's main entry (its exports map hides
       // package.json); the dist/ root is the entry's directory.
-      // Use import.meta.resolve so the exports map's "import" condition
-      // matches (require-only resolution fails here).
-      const entryUrl = await (import.meta as any).resolve('@modularizer/plat-client', import.meta.url)
+      // Use require.resolve as a fallback for environments where import.meta.resolve is not available.
+      let entryUrl: string
+      try {
+        entryUrl = await (import.meta as any).resolve('@modularizer/plat-client', import.meta.url)
+      } catch {
+        entryUrl = require.resolve('@modularizer/plat-client')
+      }
       distDir = path.dirname(fileURLToPath(entryUrl))
     },
     configureServer(server: import('vite').ViteDevServer) {

@@ -6,6 +6,7 @@ import {
   getServerNames,
   removeServerName as authorityRemoveServerName,
   requestNamespace as authorityRequestNamespace,
+  AuthorityUnavailableError,
   type ApprovedNamespace,
   type AuthorityClientError,
   type NamespaceRequestRecord,
@@ -61,6 +62,7 @@ export interface NamespaceState {
   loading: boolean
   error: string | null
   isSessionExpired: boolean
+  authorityUnavailable: boolean
   ensureAuthorityData: () => Promise<void>
   fetchMyNamespaces: () => Promise<void>
   fetchMyRequests: () => Promise<void>
@@ -134,6 +136,7 @@ export const useNamespaceStore = create<NamespaceState>()((set, get) => ({
   loading: false,
   error: null,
   isSessionExpired: false,
+  authorityUnavailable: false,
   ensureAuthorityData: async () => {
     const user = getSignedInUser()
     if (!user) return
@@ -150,7 +153,7 @@ export const useNamespaceStore = create<NamespaceState>()((set, get) => ({
   fetchMyNamespaces: async () => {
     const user = getSignedInUser()
     if (!user) return
-    set({ loading: true, error: null })
+    set({ loading: true, error: null, authorityUnavailable: false })
 
     let namespaces: ApprovedNamespace[] = []
     try {
@@ -164,11 +167,20 @@ export const useNamespaceStore = create<NamespaceState>()((set, get) => ({
         serverNames: get().serverNames,
       })
     } catch (error) {
+      if (error instanceof AuthorityUnavailableError) {
+        set({
+          loading: false,
+          authorityUnavailable: true,
+          error: error.message,
+        })
+        return
+      }
       set({
         loading: false,
         error: getErrorMessage(error),
         isSessionExpired: isSessionError(error),
       })
+      return
     }
 
     // Auto-request namespaces for users who have none
@@ -205,7 +217,7 @@ export const useNamespaceStore = create<NamespaceState>()((set, get) => ({
   fetchMyRequests: async () => {
     const user = getSignedInUser()
     if (!user) return
-    set({ loading: true, error: null })
+    set({ loading: true, error: null, authorityUnavailable: false })
     try {
       const requests = await getMyRequests(user.idToken)
       set({ requests, loading: false, isSessionExpired: false })
@@ -217,6 +229,14 @@ export const useNamespaceStore = create<NamespaceState>()((set, get) => ({
         serverNames: get().serverNames,
       })
     } catch (error) {
+      if (error instanceof AuthorityUnavailableError) {
+        set({
+          loading: false,
+          authorityUnavailable: true,
+          error: error.message,
+        })
+        return
+      }
       set({
         loading: false,
         error: getErrorMessage(error),

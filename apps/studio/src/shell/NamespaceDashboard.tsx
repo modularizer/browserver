@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useIdentityStore } from '../store/identity'
 import { useNamespaceStore } from '../store/namespace'
 
@@ -13,12 +13,11 @@ function statusClasses(status: 'pending' | 'approved' | 'rejected') {
   return 'text-yellow-300'
 }
 
-const GOOGLE_SIGN_IN_BUTTON_SRC = 'https://developers.google.com/static/identity/images/branding_guideline_sample_lt_rd_lg.svg'
-
 export function NamespaceDashboard() {
   const user = useIdentityStore((state) => state.user)
   const identityError = useIdentityStore((state) => state.error)
-  const signIn = useIdentityStore((state) => state.signIn)
+  const promptSignIn = useIdentityStore((state) => state.promptSignIn)
+  const renderSignInButton = useIdentityStore((state) => state.renderSignInButton)
   const signOut = useIdentityStore((state) => state.signOut)
   const namespaces = useNamespaceStore((state) => state.namespaces)
   const requests = useNamespaceStore((state) => state.requests)
@@ -26,6 +25,7 @@ export function NamespaceDashboard() {
   const loading = useNamespaceStore((state) => state.loading)
   const error = useNamespaceStore((state) => state.error)
   const isSessionExpired = useNamespaceStore((state) => state.isSessionExpired)
+  const authorityUnavailable = useNamespaceStore((state) => state.authorityUnavailable)
   const fetchMyNamespaces = useNamespaceStore((state) => state.fetchMyNamespaces)
   const fetchMyRequests = useNamespaceStore((state) => state.fetchMyRequests)
   const requestNamespace = useNamespaceStore((state) => state.requestNamespace)
@@ -50,12 +50,49 @@ export function NamespaceDashboard() {
     [namespaces],
   )
 
+  const signInButtonRef = useRef<HTMLDivElement | null>(null)
+
+  const mountSignInButton = useCallback((host: HTMLDivElement | null) => {
+    signInButtonRef.current = host
+    if (!host) return
+    // GIS may not be ready the moment this element mounts; retry briefly.
+    const deadline = Date.now() + 5_000
+    const tryRender = () => {
+      if (!signInButtonRef.current) return
+      if (window.google?.accounts?.id) {
+        renderSignInButton(signInButtonRef.current, {
+          theme: 'filled_black',
+          size: 'medium',
+          width: 220,
+        })
+        return
+      }
+      if (Date.now() < deadline) window.setTimeout(tryRender, 100)
+    }
+    tryRender()
+  }, [renderSignInButton])
+
   const startSignIn = () => {
     try {
-      signIn()
+      if (!promptSignIn()) {
+        setFeedback('Use the Google button to sign in.')
+      }
     } catch (nextError) {
       setFeedback(nextError instanceof Error ? nextError.message : 'Could not start sign-in.')
     }
+  }
+
+  if (authorityUnavailable) {
+    return (
+      <div className="flex h-full min-h-0 flex-col gap-2 overflow-auto">
+        <div className="rounded border border-bs-border bg-bs-bg-sidebar px-3 py-3">
+          <div className="text-[12px] text-bs-text-faint">
+            Authority/namespace features are unavailable in this build.<br />
+            This is expected in static/offline mode. To enable these features, set <code>VITE_AUTHORITY_URL</code> at build time.
+          </div>
+        </div>
+      </div>
+    )
   }
 
   if (!user) {
@@ -71,19 +108,8 @@ export function NamespaceDashboard() {
           <div className="max-w-[34rem] text-[12px] leading-5 text-bs-text-faint">
             Sign-in is optional. It gives you access to serve with standard routes under your namespace instead of `dmz/*`.
           </div>
-          <div className="mt-3">
-            <button
-              onClick={startSignIn}
-              className="inline-flex rounded focus:outline-none focus:ring-1 focus:ring-bs-border-focus"
-              aria-label="Sign in with Google"
-            >
-              <img
-                src={GOOGLE_SIGN_IN_BUTTON_SRC}
-                alt="Sign in with Google"
-                className="h-10 w-auto"
-                draggable={false}
-              />
-            </button>
+          <div className="mt-3 inline-block">
+            <div ref={mountSignInButton} style={{ colorScheme: 'light' }} />
           </div>
           {identityError ? <div className="mt-3 text-[10px] text-bs-error">{identityError}</div> : null}
           {feedback ? <div className="mt-2 text-[10px] text-bs-text-faint">{feedback}</div> : null}

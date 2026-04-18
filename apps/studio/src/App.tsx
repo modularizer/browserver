@@ -423,38 +423,6 @@ export function App({ initialProjectId, onProjectRouteChange }: AppProps) {
   const syncBrowserYaml = useWorkspaceStore((state) => state.syncBrowserYaml)
 
   useEffect(() => {
-    // Handle JWT session token in hash fragment: #session_token=eyJh...
-    const hash = window.location.hash.slice(1)
-    const hashParams = new URLSearchParams(hash)
-    const sessionToken = hashParams.get('session_token')
-    if (sessionToken) {
-      const pictureData = hashParams.get('picture_data') ?? ''
-      useIdentityStore.getState().handleSessionToken(sessionToken, pictureData)
-      hashParams.delete('session_token')
-      hashParams.delete('picture_data')
-      const remainingHash = hashParams.toString()
-      const cleanUrl = `${window.location.pathname}${window.location.search}${remainingHash ? `#${remainingHash}` : ''}`
-      window.history.replaceState({}, '', cleanUrl)
-      return
-    }
-
-    // Legacy: handle oauthGrant in query string
-    const params = new URLSearchParams(window.location.search)
-    const grantId = params.get('oauthGrant')
-    if (!grantId) return
-
-    void useIdentityStore.getState().handleOAuthCallback(grantId).finally(() => {
-      const cleanUrl = `${window.location.pathname}${window.location.hash}`
-      window.history.replaceState({}, '', cleanUrl)
-    })
-  }, [])
-
-  useEffect(() => {
-    const hashParams = new URLSearchParams(window.location.hash.slice(1))
-    if (hashParams.get('session_token')) return
-    const queryParams = new URLSearchParams(window.location.search)
-    if (queryParams.get('oauthGrant')) return
-
     if (signedInUser) {
       void ensureAuthorityData().catch(() => {})
       return
