@@ -37,6 +37,11 @@ export function App() {
       try {
         const c = await createClient(baseUrl)
         if (cancelled) return
+        
+        if (typeof c?.getStats !== 'function') {
+          throw new Error('Client initialized but server API is unreachable or invalid (getStats missing)')
+        }
+
         setClient(() => c)
         const s = await c.getStats({}) as StatsSummary
         if (!cancelled) setStats(s)
@@ -49,6 +54,10 @@ export function App() {
 
   const newGame = useCallback(async (preserveCurrent = false) => {
     if (!client) return
+    if (typeof client?.startGame !== 'function') {
+      setBanner('Error: startGame method missing on client')
+      return
+    }
     const session = await client.startGame({}) as { id: string }
     sessionIdRef.current = session.id
     setSessionId(session.id)
@@ -96,6 +105,9 @@ export function App() {
     }
     try {
       console.warn('[Wordle] Submitting guess:', guessToSubmit)
+      if (typeof client?.submitGuess !== 'function') {
+        throw new Error('submitGuess method missing on client')
+      }
       const res = await client.submitGuess({ sessionId: activeSessionId, guess: guessToSubmit }) as GuessResult
       setGuesses((g) => [...g, res])
       setCurrent('')
