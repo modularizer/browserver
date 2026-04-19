@@ -12,6 +12,11 @@ export default defineConfig(({ mode }) => ({
     platClientBundlePlugin(),
     ...(mode === 'singlefile' ? [viteSingleFile(), inlineMonacoWorkerFiles()] : []),
   ],
+  server: {
+    headers: {
+      'Cross-Origin-Opener-Policy': 'same-origin-allow-popups',
+    },
+  },
   resolve: {
     alias: {
       '@modularizer/plat/client-server': '@modularizer/plat-client/client-server',

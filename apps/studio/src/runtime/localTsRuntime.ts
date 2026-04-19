@@ -141,7 +141,7 @@ export async function startLocalTsRuntime(options: {
     serverName: options.serverName,
     log: (level, text) => useScriptRunnerStore.getState().appendServerLog(level, text),
   })
-  const rewrittenSource = prependServerConsolePreamble(
+  let rewrittenSource = prependServerConsolePreamble(
     injectRuntimeEnvIntoTsSource(
       rewriteTsCompatImports(
         normalizeControllerExports(
@@ -155,6 +155,34 @@ export async function startLocalTsRuntime(options: {
       effectiveEnv,
     ),
   )
+
+  // Accept any default export in the entrypoint file as a valid server entrypoint.
+  if (typeof options.source === 'object' && options.sourceEntryPoint && options.source[options.sourceEntryPoint]) {
+    const entry = options.source[options.sourceEntryPoint];
+    // Only synthesize an entrypoint if named controller exports are detected (legacy pattern)
+    const namedExportMatch = entry.match(/export\s*\{([^}]+)\}/);
+    const defaultExportServer = /export\s+default\s+server/.test(entry);
+    if (namedExportMatch && defaultExportServer) {
+      // Extract controller names
+      const controllers = namedExportMatch[1].split(',').map(s => s.trim()).filter(Boolean);
+      if (controllers.length > 0) {
+        // Synthesize a new entrypoint for preview
+        let synthEntry = `import { serveClientSideServer } from ${JSON.stringify(clientServerAlias.url)};\n` +
+          `import { ${controllers.join(', ')} } from './${options.sourceEntryPoint.replace(/\.ts$/, '')}';\n` +
+          `export default serveClientSideServer(${JSON.stringify(options.serverName)}, [${controllers.join(', ')}]);\n`;
+        
+        // Match the transformations applied to other files
+        synthEntry = SERVER_CONSOLE_PREAMBLE + buildTsRuntimeEnvBootstrap(effectiveEnv) + '\n' + synthEntry;
+
+        if (typeof rewrittenSource === 'object') {
+          // Use a unique name for the synthesized entrypoint to avoid colliding with index.ts or creating circular imports
+          const entryFileName = 'browserver-entry.ts';
+          rewrittenSource[entryFileName] = synthEntry;
+          options.sourceEntryPoint = entryFileName;
+        }
+      }
+    }
+  }
 
   // Inject workspace static files as a global so user code can reference __workspaceFiles.
   // We keep a single stable object and mutate it in place as workspace files change,
@@ -246,7 +274,7 @@ export async function startLocalTsRuntime(options: {
   const started = await startClientSideServerFromSource({
     source: rewrittenSource,
     serverName: options.serverName,
-    sourceEntryPoint: typeof options.source === 'object' && 'index.ts' in options.source ? 'index.ts' : undefined,
+    sourceEntryPoint: options.sourceEntryPoint,
     onRequest: composedOnRequest,
   })
   signalerRef = started.signaler as unknown as { broadcast?: (m: unknown) => Promise<void> }
