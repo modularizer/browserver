@@ -889,12 +889,15 @@ async function main(): Promise<void> {
 }
 
 async function backgroundMonitor(serverName: string) {
-  while (true) {
-    try {
-      console.log(`[site-viewer] backgroundMonitor: waiting for ${serverName} to be online...`);
-      await watchAuthorityPresence(serverName);
-      console.log(`[site-viewer] backgroundMonitor: host ${serverName} is online!`);
+  let lastFetchedHash = normalizeHash(sessionStorage.getItem(`sv:${serverName}:hash`));
 
+  onAuthorityPresence(serverName, async (online) => {
+    if (!online) return;
+
+    // We only perform a fetch when the host is confirmed online.
+    // If it's already online, this runs once at boot.
+    // Otherwise, it runs whenever it transitions from offline to online.
+    try {
       const freshResponse = await fetch(window.location.pathname + window.location.search, {
         method: 'GET',
         credentials: 'same-origin',
@@ -904,35 +907,28 @@ async function backgroundMonitor(serverName: string) {
       const isOffline = freshResponse.headers.get('x-browserver-offline') === 'true' || isOfflineErrorMessage(freshHtml);
 
       if (!isOffline && freshResponse.ok) {
-        // If we were showing the failed indicator, remove it
         document.getElementById('site-viewer-failed-indicator')?.remove();
-
         const freshHash = normalizeHash(freshResponse.headers.get('etag') || freshHtml);
-        const serverKey = `sv:${serverName}`;
-        const lastAppliedHash = normalizeHash(sessionStorage.getItem(`${serverKey}:hash`));
 
-        if (lastAppliedHash !== freshHash) {
-          // If we are currently showing the offline landing page (no cache was rendered), or we have no hash yet, auto-render
-          const isShowingLandingPage = !!document.getElementById('site-viewer-offline-landing-flag'); // I'll add this flag to the landing page
-          if (!(window as any).__siteViewerHasRendered || isShowingLandingPage || !lastAppliedHash) {
+        if (lastFetchedHash !== freshHash) {
+          lastFetchedHash = freshHash;
+          const isShowingLandingPage = !!document.getElementById('site-viewer-offline-landing-flag');
+          if (!(window as any).__siteViewerHasRendered || isShowingLandingPage) {
             console.log('[site-viewer] backgroundMonitor: auto-rendering live content');
             await renderHtmlDocument(freshHtml);
           } else {
-            // We already rendered something (cache), and now host is back with newer content -> show update prompt
             console.log('[site-viewer] backgroundMonitor: showing update available prompt');
             showUpdateAvailableIndicator(() => window.location.reload());
           }
         }
         
-        await cacheHtmlSet(`${serverKey}:html`, freshHtml);
-        sessionStorage.setItem(`${serverKey}:hash`, freshHash ?? '');
+        await cacheHtmlSet(`sv:${serverName}:html`, freshHtml);
+        sessionStorage.setItem(`sv:${serverName}:hash`, freshHash ?? '');
       }
     } catch (err) {
-      console.warn('[site-viewer] backgroundMonitor error', err);
+      console.warn('[site-viewer] backgroundMonitor error during reactive fetch', err);
     }
-    // Small delay before next presence watch to avoid spamming if the socket closes/opens rapidly
-    await new Promise(r => setTimeout(r, 5000));
-  }
+  });
 }
 
 main().catch((err) => {

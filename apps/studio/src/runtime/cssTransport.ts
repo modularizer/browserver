@@ -165,58 +165,123 @@ async function dialAuthorityChannel(requestedName: string): Promise<AuthorityDia
 }
 
 /**
- * Opens a WebSocket to the authority's `/ws/presence` endpoint and resolves
- * when the named server becomes online. If the socket can't be opened or is
- * lost before an online event arrives, resolves after a short delay so the
- * outer reconnect backoff loop can retry `dial` directly.
- *
- * Protocol (see plat/authority/src/models/authority-types.ts):
- *   → { type: 'subscribe', server_names: [name] }
- *   ← { type: 'presence_snapshot', servers: [{ server_name, online }] }
- *   ← { type: 'presence_update', server_name, online }
+ * Manages a single, persistent WebSocket connection to the authority's presence service.
  */
-export function watchAuthorityPresence(serverName: string): Promise<void> {
-  return new Promise<void>((resolve) => {
-    let settled = false
-    let socket: WebSocket | null = null
-    const done = () => {
-      if (settled) return
-      settled = true
-      try { socket?.close() } catch { /* ignore */ }
-      resolve()
+class PresenceClient {
+  private socket: WebSocket | null = null
+  private subscribers = new Map<string, Set<(online: boolean) => void>>()
+  private states = new Map<string, boolean>()
+  private backoffMs = 500
+  private maxBackoffMs = 30_000
+  private connecting = false
+
+  subscribe(serverName: string, cb: (online: boolean) => void): () => void {
+    let subs = this.subscribers.get(serverName)
+    if (!subs) {
+      subs = new Set()
+      this.subscribers.set(serverName, subs)
+      this.sendSubscription(serverName)
     }
+    subs.add(cb)
+    
+    // Immediately notify of current known state if available
+    const current = this.states.get(serverName)
+    if (current !== undefined) cb(current)
+
+    return () => {
+      subs?.delete(cb)
+      if (subs?.size === 0) {
+        this.subscribers.delete(serverName)
+        // We could unsubscribe on the server too, but for simplicity we just keep the socket open
+      }
+    }
+  }
+
+  private ensureConnected() {
+    if (this.socket || this.connecting) return
+    this.connecting = true
 
     try {
       const http = getAuthorityHttpBaseUrl()
       const wsBase = http.replace(/^http/, 'ws')
-      socket = new WebSocket(`${wsBase}/ws/presence`)
-    } catch {
-      setTimeout(done, 2_000)
+      this.socket = new WebSocket(`${wsBase}/ws/presence`)
+    } catch (err) {
+      this.handleFailure()
       return
     }
 
-    const fallbackTimeout = window.setTimeout(done, 120_000)
-    const clearFallback = () => window.clearTimeout(fallbackTimeout)
-
-    socket.addEventListener('open', () => {
-      socket?.send(JSON.stringify({ type: 'subscribe', server_names: [serverName] }))
+    this.socket.addEventListener('open', () => {
+      this.connecting = false
+      this.backoffMs = 500
+      for (const serverName of this.subscribers.keys()) {
+        this.sendSubscription(serverName)
+      }
     })
 
-    socket.addEventListener('message', (ev) => {
+    this.socket.addEventListener('message', (ev) => {
       try {
         const msg = JSON.parse(typeof ev.data === 'string' ? ev.data : '')
         if (msg?.type === 'presence_snapshot' && Array.isArray(msg.servers)) {
-          const hit = msg.servers.find((s: any) => s?.server_name === serverName)
-          if (hit?.online) { clearFallback(); done() }
-        } else if (msg?.type === 'presence_update' && msg.server_name === serverName && msg.online) {
-          clearFallback()
-          done()
+          for (const s of msg.servers) {
+            this.updateState(s.server_name, !!s.online)
+          }
+        } else if (msg?.type === 'presence_update' && msg.server_name) {
+          this.updateState(msg.server_name, !!msg.online)
         }
       } catch { /* ignore */ }
     })
-    socket.addEventListener('error', () => { clearFallback(); done() })
-    socket.addEventListener('close', () => { clearFallback(); done() })
+
+    this.socket.addEventListener('error', () => this.handleFailure())
+    this.socket.addEventListener('close', () => this.handleFailure())
+  }
+
+  private handleFailure() {
+    this.connecting = false
+    this.socket = null
+    setTimeout(() => this.ensureConnected(), this.backoffMs)
+    this.backoffMs = Math.min(this.backoffMs * 2, this.maxBackoffMs)
+  }
+
+  private sendSubscription(serverName: string) {
+    if (this.socket?.readyState === WebSocket.OPEN) {
+      this.socket.send(JSON.stringify({ type: 'subscribe', server_names: [serverName] }))
+    } else {
+      this.ensureConnected()
+    }
+  }
+
+  private updateState(serverName: string, online: boolean) {
+    this.states.set(serverName, online)
+    const subs = this.subscribers.get(serverName)
+    if (subs) {
+      for (const cb of subs) cb(online)
+    }
+  }
+}
+
+const presenceClient = new PresenceClient()
+
+/**
+ * Returns a promise that resolves when the named server is online.
+ * Uses a shared, persistent WebSocket connection.
+ */
+export function watchAuthorityPresence(serverName: string): Promise<void> {
+  return new Promise<void>((resolve) => {
+    const unsub = presenceClient.subscribe(serverName, (online) => {
+      if (online) {
+        unsub()
+        resolve()
+      }
+    })
   })
+}
+
+/**
+ * Subscribes to presence changes for a named server.
+ * Returns an unsubscribe function.
+ */
+export function onAuthorityPresence(serverName: string, cb: (online: boolean) => void): () => void {
+  return presenceClient.subscribe(serverName, cb)
 }
 
 async function connectAuthorityChannel(requestedName: string): Promise<AuthorityConnectResult> {
