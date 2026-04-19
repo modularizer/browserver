@@ -18,12 +18,15 @@ function stateClass(state: LetterState | undefined, filled: boolean): string {
 export function App() {
   const [client, setClient] = useState<any>(null)
   const sessionIdRef = useRef<string | null>(null)
+  const [sessionId, setSessionId] = useState<string | null>(null)
   const [guesses, setGuesses] = useState<GuessResult[]>([])
   const [current, setCurrent] = useState('')
   const [gameOver, setGameOver] = useState(false)
   const [answer, setAnswer] = useState<string | null>(null)
   const [banner, setBanner] = useState<string | null>(null)
   const [stats, setStats] = useState<StatsSummary>(EMPTY_STATS)
+  const isFirstClientSet = useRef(true)
+  const [pendingGuess, setPendingGuess] = useState<string | null>(null)
 
   useEffect(() => {
     // Use window.baseUrl (must be set by index.html)
@@ -44,25 +47,56 @@ export function App() {
     return () => { cancelled = true }
   }, [])
 
-  const newGame = useCallback(async () => {
+  const newGame = useCallback(async (preserveCurrent = false) => {
     if (!client) return
     const session = await client.startGame({}) as { id: string }
     sessionIdRef.current = session.id
+    setSessionId(session.id)
     setGuesses([])
-    setCurrent('')
+    if (!preserveCurrent) setCurrent('')
     setGameOver(false)
     setAnswer(null)
     setBanner(null)
   }, [client])
 
-  useEffect(() => { if (client) void newGame() }, [client, newGame])
+  // On client set, start a new game, but preserve current guess if first time and user has typed
+  useEffect(() => {
+    if (client) {
+      if (isFirstClientSet.current) {
+        isFirstClientSet.current = false
+        // Only preserve current if user has typed something
+        void newGame(current.length > 0)
+      } else {
+        void newGame()
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [client])
 
-  const onSubmit = useCallback(async () => {
+  // Modified onSubmit to accept an optional guess param (for queued guess)
+  const onSubmit = useCallback(async (guessOverride?: string) => {
     const activeSessionId = sessionIdRef.current
-    if (!client || !activeSessionId || gameOver) return
-    if (current.length !== WORD_LEN) { setBanner('Need 5 letters'); return }
+    if (!client) {
+      // Queue the guess for when client is ready
+      if (guessOverride || current) {
+        console.warn('[Wordle] Queuing guess before client:', guessOverride || current)
+        setPendingGuess(guessOverride || current)
+      }
+      setBanner('Connecting... will submit when ready')
+      return
+    }
+    if (!activeSessionId || gameOver) {
+      console.warn('[Wordle] Not submitting: no session or game over', { activeSessionId, gameOver })
+      return
+    }
+    const guessToSubmit = guessOverride ?? current
+    if (guessToSubmit.length !== WORD_LEN) {
+      console.warn('[Wordle] Not submitting: guess not 5 letters', guessToSubmit)
+      setBanner('Need 5 letters'); return
+    }
     try {
-      const res = await client.submitGuess({ sessionId: activeSessionId, guess: current }) as GuessResult
+      console.warn('[Wordle] Submitting guess:', guessToSubmit)
+      const res = await client.submitGuess({ sessionId: activeSessionId, guess: guessToSubmit }) as GuessResult
       setGuesses((g) => [...g, res])
       setCurrent('')
       setBanner(null)
@@ -73,9 +107,24 @@ export function App() {
         setStats(await client.getStats({}) as StatsSummary)
       }
     } catch (err: any) {
+      console.warn('[Wordle] Error submitting guess:', err)
       setBanner(String(err?.message ?? err))
     }
   }, [client, current, gameOver])
+
+  // Dedicated effect: submit pending guess after client connects and sessionId is set
+  useEffect(() => {
+    if (client && sessionId && pendingGuess) {
+      console.warn('[Wordle] Detected pending guess after client+sessionId:', pendingGuess)
+      setBanner(null)
+      void onSubmit(pendingGuess)
+      setPendingGuess(null)
+    }
+  }, [client, sessionId, pendingGuess, onSubmit])
+
+  // Ref to always have the latest onSubmit
+  const onSubmitRef = useRef(onSubmit)
+  useEffect(() => { onSubmitRef.current = onSubmit }, [onSubmit])
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -130,13 +179,15 @@ export function App() {
         {rows.map((row, i) => (
           <div key={i} className="grid grid-cols-5 gap-1.5">
             {row.map((cell, j) => (
-              <div key={j} className={`h-14 w-14 border-2 flex items-center justify-center text-2xl font-bold uppercase rounded ${stateClass(cell.state, cell.filled)}`}>
+              <div key={j} className={`h-14 w-14 border-2 flex items-center justify-center text-2xl font-bold uppercase rounded ${stateClass(cell.state, cell.filled)}`}> 
                 {cell.ch}
               </div>
             ))}
           </div>
         ))}
       </div>
+
+      {/* Keyboard input only; input box and submit button removed as per original design */}
 
       <p className="text-xs text-slate-500 mb-4">type to guess · enter to submit · backspace to delete</p>
 

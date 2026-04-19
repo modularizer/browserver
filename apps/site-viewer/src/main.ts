@@ -1,3 +1,53 @@
+// --- IndexedDB HTML cache for large payloads ---
+const DB_NAME = 'siteViewerCache';
+const DB_STORE = 'html';
+const DB_VERSION = 1;
+
+function openHtmlDb(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, DB_VERSION);
+    req.onupgradeneeded = () => {
+      req.result.createObjectStore(DB_STORE);
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+function idbGetHtml(key: string): Promise<string | null> {
+  return openHtmlDb().then(db => new Promise((resolve, reject) => {
+    const tx = db.transaction(DB_STORE, 'readonly');
+    const store = tx.objectStore(DB_STORE);
+    const req = store.get(key);
+    req.onsuccess = () => resolve(typeof req.result === 'string' ? req.result : null);
+    req.onerror = () => reject(req.error);
+  }));
+}
+
+function idbSetHtml(key: string, value: string): Promise<void> {
+  return openHtmlDb().then(db => new Promise((resolve, reject) => {
+    const tx = db.transaction(DB_STORE, 'readwrite');
+    const store = tx.objectStore(DB_STORE);
+    const req = store.put(value, key);
+    req.onsuccess = () => resolve();
+    req.onerror = () => reject(req.error);
+  }));
+}
+
+function idbRemoveHtml(key: string): Promise<void> {
+  return openHtmlDb().then(db => new Promise((resolve, reject) => {
+    const tx = db.transaction(DB_STORE, 'readwrite');
+    const store = tx.objectStore(DB_STORE);
+    const req = store.delete(key);
+    req.onsuccess = () => resolve();
+    req.onerror = () => reject(req.error);
+  }));
+}
+// Normalize hash for comparison: strip quotes and trim whitespace
+function normalizeHash(hash: string | null | undefined): string | null {
+  if (typeof hash !== 'string') return null;
+  return hash.replace(/^"|"$/g, '').trim();
+}
 // Site viewer shell — runs inside the SW-served top-level document.
 //
 // Responsibilities:
@@ -151,8 +201,6 @@ function getConnection(serverName: string): Promise<BrowserverCssFetchConnection
     conn.onPeerEvent(async (event) => {
       if (event === 'workspace-files-changed') {
         console.log('[site-viewer] workspace-files-changed → hot swap')
-        // Fetch the fresh response behind the scenes (bypassing the SW cache)
-        // then swap the document in place — avoids the blank-reload flash.
         try {
           const sw = navigator.serviceWorker.controller
           if (sw) {
@@ -169,7 +217,7 @@ function getConnection(serverName: string): Promise<BrowserverCssFetchConnection
             credentials: 'same-origin',
             cache: 'reload',
           })
-          await renderResponse(fresh)
+          await applyResponseWithHashCheck(fresh)
         } catch (err) {
           console.warn('[site-viewer] hot swap failed, falling back to reload', err)
           window.location.reload()
@@ -245,24 +293,71 @@ async function ensureServiceWorkerControlling(): Promise<void> {
   await new Promise(() => {})
 }
 
+// Diagnostic: track and log each document rewrite
+if (typeof window !== 'undefined') {
+  (window as any).__siteViewerRenderId = 0;
+}
+
+// Floating update indicator
+function showUpdateAvailableIndicator(onClick: () => void) {
+  let indicator = document.getElementById('site-viewer-update-indicator') as HTMLDivElement | null;
+  if (!indicator) {
+    indicator = document.createElement('div');
+    indicator.id = 'site-viewer-update-indicator';
+    indicator.style.position = 'fixed';
+    indicator.style.bottom = '24px';
+    indicator.style.right = '24px';
+    indicator.style.zIndex = '9999';
+    indicator.style.background = '#222';
+    indicator.style.color = '#fff';
+    indicator.style.padding = '10px 18px';
+    indicator.style.borderRadius = '8px';
+    indicator.style.boxShadow = '0 2px 8px rgba(0,0,0,0.18)';
+    indicator.style.cursor = 'pointer';
+    indicator.style.fontFamily = 'inherit';
+    indicator.style.fontSize = '16px';
+    indicator.textContent = 'Update available – click to refresh';
+    indicator.onclick = () => {
+      indicator?.remove();
+      onClick();
+    };
+    document.body.appendChild(indicator);
+  }
+}
+
+// Diagnostic: track and log each document rewrite
+if (typeof window !== 'undefined') {
+  (window as any).__siteViewerRenderId = 0;
+}
+
 async function renderHtmlDocument(html: string): Promise<void> {
-  // document.open/write/close re-parses the HTML, which re-executes inline
-  // and external <script> tags natively. The document URL stays at the
-  // navigation URL, so relative and root-absolute subresource requests
-  // resolve sensibly and flow back through the SW.
-
-  // Write HTML as before
-  document.open()
-  document.write(html)
-  document.close()
-
-  // After render, ensure favicon is present
-  await ensureDocumentFavicon()
+  // Diagnostic: increment and log render count and stack
+  if (typeof window !== 'undefined') {
+    (window as any).__siteViewerRenderId = ((window as any).__siteViewerRenderId || 0) + 1;
+    const renderId = (window as any).__siteViewerRenderId;
+    console.warn(`[site-viewer] renderHtmlDocument: renderId=${renderId} (hasRendered? ${(window as any).__siteViewerHasRendered ? 'yes' : 'no'})`);
+    console.warn(new Error(`[site-viewer] renderHtmlDocument stack trace for renderId=${renderId}`));
+  }
+  if (!(window as any).__siteViewerHasRendered) {
+    // First render: use document.write
+    (window as any).__siteViewerHasRendered = true;
+    document.open();
+    document.write(html);
+    document.close();
+    await ensureDocumentFavicon();
+    return;
+  } else {
+    // Not first render: do nothing (should never happen except via update indicator logic)
+    console.warn('[site-viewer] Already rendered once, skipping further render.');
+    return;
+  }
 }
 
 async function renderResponse(response: Response): Promise<void> {
   const contentType = (response.headers.get('content-type') || '').toLowerCase()
-
+  const hashRaw = response.headers.get('etag') || (await response.clone().text())
+  const hash = normalizeHash(hashRaw)
+  console.warn('[site-viewer] renderResponse: content hash', { hash })
   if (contentType.startsWith('text/html')) {
     await renderHtmlDocument(await response.text())
     return
@@ -299,7 +394,58 @@ img{max-width:100vw;max-height:100vh;object-fit:contain}
   await renderHtmlDocument(`<!doctype html><html><body><embed src="${blobUrl}" type="${contentType}"></body></html>`)
 }
 
+// Hash check and apply logic for hot swap only
+async function applyResponseWithHashCheck(response: Response) {
+  const newHashRaw = response.headers.get('etag') || (await response.clone().text())
+  const oldHashRaw = sessionStorage.getItem('siteViewerLastAppliedHash')
+  const newHash = normalizeHash(newHashRaw)
+  const oldHash = normalizeHash(oldHashRaw)
+  console.warn('[site-viewer] applyResponseWithHashCheck: old/new hash', { oldHash, newHash })
+  if (oldHash === newHash && oldHash !== null) {
+    console.warn('[site-viewer] code unchanged (hash matched), skipping document rewrite', { hash: newHash })
+    return
+  }
+  if (oldHash === null) {
+    // Should not happen in hot swap, but log for completeness
+    console.warn('[site-viewer] hot swap: no previous hash, applying content', { newHash })
+  } else {
+    console.warn('[site-viewer] code changed (hash mismatch), rewriting document', { oldHash, newHash })
+  }
+  sessionStorage.setItem('siteViewerLastAppliedHash', newHash ?? '')
+  await renderResponse(response)
+}
+
+// Utility: cache HTML in IndexedDB only
+async function cacheHtmlSet(key: string, value: string): Promise<boolean> {
+  try {
+    await idbSetHtml(key, value);
+    return true;
+  } catch (e) {
+    console.warn(`[site-viewer] IndexedDB cache failed for key: ${key}`, e);
+    return false;
+  }
+}
+
+async function cacheHtmlGet(key: string): Promise<string | null> {
+  try {
+    return await idbGetHtml(key);
+  } catch (e) {
+    console.warn(`[site-viewer] IndexedDB cache get failed for key: ${key}`, e);
+    return null;
+  }
+}
+
+async function cacheHtmlRemove(key: string): Promise<void> {
+  try { await idbRemoveHtml(key); } catch {}
+}
+
 async function main(): Promise<void> {
+  // Hard guard: if already rendered for this navigation, do nothing
+  if ((window as any).__siteViewerHasRendered) {
+    console.warn('[site-viewer] main(): already rendered for this navigation, skipping.');
+    return;
+  }
+
   const target = parseTargetFromLocation()
   if (!target) {
     setStatus('No site specified. Visit /<namespace>/<project>/ to view a site.')
@@ -309,31 +455,94 @@ async function main(): Promise<void> {
   setStatus(`Connecting to css://${target.serverName}…`)
   installTransportBridge()
   await ensureServiceWorkerControlling()
-
-  // Start the WebRTC handshake in the background — DON'T await it. If the SW
-  // cache can serve the upcoming fetch we want to skip the handshake entirely.
-  // Cache misses will hit the bridge, which awaits this same promise lazily.
   void getConnection(target.serverName)
-
-  // Best-effort trailing-slash fix using the URL's first two segments as the
-  // server name. Correct for the common <ns>/<project> case; longer canonical
-  // names will still work but won't auto-correct from a slash-less URL.
   if (window.location.pathname === '/' + target.serverName) {
     window.history.replaceState(null, '', '/' + target.serverName + '/' + window.location.search + window.location.hash)
   }
 
-  // Let the SW's stale-while-revalidate serve the cached HTML instantly and
-  // refresh it in the background. Hard-refresh (Ctrl+Shift+R) naturally
-  // propagates `cache: 'reload'`, which the SW treats as a bypass; a soft F5
-  // keeps the SWR behaviour for an instant paint. The workspace-files-changed
-  // peer event (see getConnection) triggers an auto-reload once fresh content
-  // is available, so stale-first is safe.
-  const response = await fetch(window.location.pathname + window.location.search, {
-    method: 'GET',
-    credentials: 'same-origin',
-    cache: 'default',
-  })
-  await renderResponse(response)
+
+  // 1. Try to get cached (possibly stale) content from IndexedDB only
+  let didRender = false;
+  let lastHash = normalizeHash(sessionStorage.getItem('siteViewerLastAppliedHash'));
+  let cachedHtml = await cacheHtmlGet('siteViewerLastHtml');
+  // Use a global flag to ensure only one render per navigation
+  if (!(window as any).__siteViewerHasRendered) {
+    if (cachedHtml && lastHash) {
+      console.warn('[site-viewer] Rendering from cache (no bootstrap check)');
+      await renderHtmlDocument(cachedHtml);
+      (window as any).__siteViewerHasRendered = true;
+      didRender = true;
+    } else {
+      // Cache miss or missing hash: fetch and render
+      try {
+        console.warn('[site-viewer] Cache miss or missing hash, fetching from network (no bootstrap check)');
+        const response = await fetch(window.location.pathname + window.location.search, {
+          method: 'GET',
+          credentials: 'same-origin',
+          cache: 'default',
+        });
+        const responseHtml = await response.text();
+        const responseHash = normalizeHash(response.headers.get('etag') || responseHtml);
+        await renderHtmlDocument(responseHtml);
+        (window as any).__siteViewerHasRendered = true;
+        didRender = true;
+        await cacheHtmlSet('siteViewerLastHtml', responseHtml);
+        sessionStorage.setItem('siteViewerLastAppliedHash', responseHash ?? '');
+      } catch (err) {
+        console.warn('[site-viewer] main: initial fetch failed', err);
+      }
+    }
+  } else {
+    console.warn('[site-viewer] Not rendering: already rendered for this navigation.');
+  }
+
+  // 2. If no cached HTML, fetch and render, and store in IndexedDB only
+  if (!didRender) {
+    try {
+      const response = await fetch(window.location.pathname + window.location.search, {
+        method: 'GET',
+        credentials: 'same-origin',
+        cache: 'default',
+      });
+      const responseHtml = await response.text();
+      const responseHash = normalizeHash(response.headers.get('etag') || responseHtml);
+      if (document.body && document.body.childNodes.length === 1 && (document.body.firstChild as HTMLElement)?.id === 'bootstrap') {
+        await renderHtmlDocument(responseHtml);
+        didRender = true;
+      }
+      await cacheHtmlSet('siteViewerLastHtml', responseHtml);
+      sessionStorage.setItem('siteViewerLastAppliedHash', responseHash ?? '');
+      // Clear any pending nextHtml/nextHash to prevent update indicator or reload loop
+      await cacheHtmlRemove('siteViewerNextHtml');
+      sessionStorage.removeItem('siteViewerNextHash');
+    } catch (err) {
+      console.warn('[site-viewer] main: initial fetch failed', err);
+    }
+  }
+
+  // 3. In the background, fetch fresh content and only update storage/indicator if hash differs
+  try {
+    const freshResponse = await fetch(window.location.pathname + window.location.search, {
+      method: 'GET',
+      credentials: 'same-origin',
+      cache: 'reload',
+    });
+    const freshHtml = await freshResponse.text();
+    const freshHash = normalizeHash(freshResponse.headers.get('etag') || freshHtml);
+    const lastHash2 = normalizeHash(sessionStorage.getItem('siteViewerLastAppliedHash'));
+    if (lastHash2 !== freshHash && freshHash) {
+      // Always update cache if content changed
+      await cacheHtmlSet('siteViewerLastHtml', freshHtml);
+      sessionStorage.setItem('siteViewerLastAppliedHash', freshHash);
+      showUpdateAvailableIndicator(() => {
+        window.location.reload();
+      });
+    } else {
+      // No update, do nothing
+    }
+  } catch (err) {
+    console.warn('[site-viewer] main: background fetch failed', err);
+  }
 }
 
 main().catch((err) => {
