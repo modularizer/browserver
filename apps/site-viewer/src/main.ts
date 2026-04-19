@@ -3,32 +3,55 @@ const DB_NAME = 'siteViewerCache';
 const DB_STORE = 'html';
 const DB_VERSION = 1;
 
+let dbPromise: Promise<IDBDatabase> | null = null;
 function openHtmlDb(): Promise<IDBDatabase> {
-  return new Promise((resolve, reject) => {
+  if (dbPromise) return dbPromise;
+  dbPromise = new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
     req.onupgradeneeded = () => {
       req.result.createObjectStore(DB_STORE);
     };
     req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
+    req.onerror = () => {
+      dbPromise = null;
+      reject(req.error);
+    };
   });
+  return dbPromise;
 }
 
-function idbGetHtml(key: string): Promise<string | null> {
+async function idbGetHtml(key: string): Promise<string | null> {
+  // 1. LocalStorage Fast-Path (~0ms)
+  const fastPath = localStorage.getItem(key);
+  if (fastPath) return fastPath;
+
+  // 2. IndexedDB Fallback
   return openHtmlDb().then(db => new Promise((resolve, reject) => {
     const tx = db.transaction(DB_STORE, 'readonly');
     const store = tx.objectStore(DB_STORE);
     const req = store.get(key);
-    req.onsuccess = () => resolve(typeof req.result === 'string' ? req.result : null);
+    req.onsuccess = () => resolve(req.result || null);
     req.onerror = () => reject(req.error);
   }));
 }
 
-function idbSetHtml(key: string, value: string): Promise<void> {
+async function idbSetHtml(key: string, html: string): Promise<void> {
+  // 1. LocalStorage Fast-Path (if small enough)
+  if (html.length < 2 * 1024 * 1024) { // 2MB
+    try {
+      localStorage.setItem(key, html);
+    } catch (e) {
+      console.warn('[site-viewer] localStorage quota exceeded, using IndexedDB only');
+    }
+  } else {
+    localStorage.removeItem(key);
+  }
+
+  // 2. IndexedDB source of truth
   return openHtmlDb().then(db => new Promise((resolve, reject) => {
     const tx = db.transaction(DB_STORE, 'readwrite');
     const store = tx.objectStore(DB_STORE);
-    const req = store.put(value, key);
+    const req = store.put(html, key);
     req.onsuccess = () => resolve();
     req.onerror = () => reject(req.error);
   }));
@@ -114,6 +137,7 @@ function parseTargetFromLocation(): { serverName: string; requestPath: string } 
 function setStatus(text: string, isError = false): void {
   const el = document.getElementById('bootstrap')
   if (!el) return
+  console.log(`[site-viewer] setStatus(${isError ? 'ERROR: ' : ''}${text})`);
   el.textContent = text
   el.classList.toggle('error', isError)
 }
@@ -523,7 +547,7 @@ if (typeof window !== 'undefined') {
   (window as any).__siteViewerRenderId = 0;
 }
 
-async function renderHtmlDocument(html: string): Promise<void> {
+async function renderHtmlDocument(html: string, options?: { duration?: number }): Promise<void> {
   // Diagnostic: increment and log render count and stack
   if (typeof window !== 'undefined') {
     (window as any).__siteViewerRenderId = ((window as any).__siteViewerRenderId || 0) + 1;
@@ -531,12 +555,51 @@ async function renderHtmlDocument(html: string): Promise<void> {
     console.warn(`[site-viewer] renderHtmlDocument: renderId=${renderId} (hasRendered? ${(window as any).__siteViewerHasRendered ? 'yes' : 'no'})`);
     console.warn(new Error(`[site-viewer] renderHtmlDocument stack trace for renderId=${renderId}`));
   }
+  
   if (!(window as any).__siteViewerHasRendered) {
-    // First render: use document.write
     (window as any).__siteViewerHasRendered = true;
+
+    // Inject progress bar into the HTML string before writing it, so it appears instantly
+    let finalHtml = html;
+
+    // Sanitize scripts to be non-blocking for the initial cache-render
+    // This prevents external scripts (like Tailwind CDN) from stalling document.write
+    finalHtml = finalHtml.replace(/<script\b([^>]*\bsrc\s*=)/gi, '<script async $1');
+
+    if (options?.duration) {
+      const barStyle = `
+        #site-viewer-progress-bar {
+          position: fixed; bottom: 0; left: 0; height: 4px;
+          background: #0078d4; z-index: 2147483647;
+          width: 0%; pointer-events: none;
+          animation: site-viewer-progress ${options.duration}ms linear forwards;
+        }
+        @keyframes site-viewer-progress {
+          0% { width: 0%; }
+          100% { width: 90%; }
+        }
+      `;
+      const barHtml = `<div id="site-viewer-progress-bar"></div>`;
+      finalHtml = html
+        .replace('</head>', `<style>${barStyle}</style></head>`)
+        .replace('<body>', `<body>${barHtml}`);
+      
+      // If no <head> or <body> tags, just prepend (unlikely for full HTML documents)
+      if (finalHtml === html) {
+        finalHtml = `<style>${barStyle}</style>${barHtml}${html}`;
+      }
+    }
+
+    const tOpen = performance.now();
     document.open();
-    document.write(html);
+    const tWrite = performance.now();
+    document.write(finalHtml);
+    const tClose = performance.now();
     document.close();
+    const tEnd = performance.now();
+
+    console.log(`[site-viewer-perf] document.open: ${(tWrite - tOpen).toFixed(2)}ms, document.write: ${(tClose - tWrite).toFixed(2)}ms, document.close: ${(tEnd - tClose).toFixed(2)}ms`);
+
     void ensureDocumentFavicon();
     // Yield to let the document settle
     await new Promise(resolve => setTimeout(resolve, 0));
@@ -621,21 +684,14 @@ async function cacheHtmlSet(key: string, value: string): Promise<boolean> {
   }
 }
 
-async function cacheHtmlGet(key: string): Promise<string | null> {
-  try {
-    return await idbGetHtml(key);
-  } catch (e) {
-    console.warn(`[site-viewer] IndexedDB cache get failed for key: ${key}`, e);
-    return null;
-  }
-}
-
 async function main(): Promise<void> {
+  const bootStart = performance.now();
   const target = parseTargetFromLocation()
   if (!target) {
     setStatus('No site specified. Visit /<namespace>/<project>/ to view a site.')
     return
   }
+  const targetResolved = performance.now();
 
   const startTime = Date.now();
   const serverKey = `sv:${target.serverName}`;
@@ -643,41 +699,67 @@ async function main(): Promise<void> {
   const duration = storedDuration ? parseInt(storedDuration, 10) : 10000;
 
   // Hard guard: if already rendered for this navigation, do nothing
-  if ((window as any).__siteViewerHasRendered) {
-    console.warn('[site-viewer] main(): already rendered for this navigation, skipping.');
-    return;
-  }
-
-  // 0. Start progress bar immediately (even before SW/Connection)
+  // 0. Start progress bar immediately (even if already rendered, to sync state)
   showLoadingProgressBar(duration);
 
-  setStatus(`Connecting to css://${target.serverName}…`)
+  // 1. Perform background setup ALWAYS
+  setStatus('Initializing transport bridge...')
   installTransportBridge()
+  const setupStart = performance.now();
+  const swReadyStart = performance.now();
+  setStatus('Preparing service worker...')
   await ensureServiceWorkerControlling()
+  const swReadyEnd = performance.now();
+  setStatus(`Connecting to host: css://${target.serverName}…`)
   void getConnection(target.serverName)
+  const setupEnd = performance.now();
+  console.log(`[site-viewer-perf] Target resolution: ${(targetResolved - bootStart).toFixed(2)}ms, Setup (Bridge+SW+Conn): ${(setupEnd - setupStart).toFixed(2)}ms (SW part: ${(swReadyEnd - swReadyStart).toFixed(2)}ms)`);
+
   if (window.location.pathname === '/' + target.serverName) {
     window.history.replaceState(null, '', '/' + target.serverName + '/' + window.location.search + window.location.hash)
   }
 
+  // 2. CHECK IF ALREADY RENDERED (e.g. by inline bootstrap)
   if ((window as any).__siteViewerHasRendered) {
-    console.warn('[site-viewer] main(): already rendered for this navigation, skipping initial logic.');
-  } else {
-    // 1. Immediately try to render from cache if available
-    const cachedHtml = await cacheHtmlGet(`${serverKey}:html`);
-    if (cachedHtml) {
-      console.warn('[site-viewer] main: immediate cache render');
-      await renderHtmlDocument(cachedHtml);
-      // Re-add bar because document.write clears it
-      showLoadingProgressBar(duration);
-    }
+    console.warn('[site-viewer] main(): already rendered for this navigation, skipping initial fetch/cache logic.');
+    // Yield to let the document settle and then start monitoring
+    await new Promise(resolve => setTimeout(resolve, 0));
+    backgroundMonitor(target.serverName);
+    return;
+  }
 
+  // 3. IMMEDIATELY try to render from cache if available (IndexedDB fallback)
+  setStatus('Checking local cache...')
+  const cacheFetchStart = performance.now();
+  const cachedHtml = await idbGetHtml(`${serverKey}:html`);
+  const cacheFetchEnd = performance.now();
+  
+  if (cachedHtml && !(window as any).__siteViewerHasRendered) {
+    console.warn('[site-viewer] main: immediate cache render (pre-setup)');
+    const renderStart = performance.now();
+    // Pass duration to renderHtmlDocument so it can inject the bar
+    await renderHtmlDocument(cachedHtml, { duration });
+    const renderEnd = performance.now();
+    console.log(`[site-viewer-perf] Cache fetch: ${(cacheFetchEnd - cacheFetchStart).toFixed(2)}ms, Render (Total): ${(renderEnd - renderStart).toFixed(2)}ms`);
+  } else {
+    console.log(`[site-viewer-perf] Cache fetch: ${(cacheFetchEnd - cacheFetchStart).toFixed(2)}ms (no cache or already rendered)`);
+  }
+
+  if ((window as any).__siteViewerHasRendered) {
+    console.warn('[site-viewer] main(): already rendered for this navigation, skipping initial fetch logic.');
+  } else {
+    // 4. No cache was rendered -> we need to wait for the fresh content
     try {
+      setStatus('Fetching fresh site content from host...')
       console.warn('[site-viewer] main: fetching fresh content');
+      const networkFetchStart = performance.now();
       const response = await fetch(window.location.pathname + window.location.search, {
         method: 'GET',
         credentials: 'same-origin',
         cache: 'default',
       });
+      const networkFetchEnd = performance.now();
+      console.log(`[site-viewer-perf] Network fetch: ${(networkFetchEnd - networkFetchStart).toFixed(2)}ms`);
 
       const responseHtml = await response.text();
       const isOffline = response.headers.get('x-browserver-offline') === 'true' || isOfflineErrorMessage(responseHtml);
@@ -729,6 +811,7 @@ async function main(): Promise<void> {
       }
     } catch (err) {
       console.warn('[site-viewer] main: initial fetch failed', err);
+      // We already checked if rendered in the outer block, but let's be safe
       if ((window as any).__siteViewerHasRendered) {
         showFailedToLoadIndicator('using cached version');
       } else {
@@ -737,7 +820,7 @@ async function main(): Promise<void> {
     }
   }
 
-  // 3. In the background, listen for presence and sync content
+  // 4. In the background, listen for presence and sync content
   backgroundMonitor(target.serverName);
 }
 
