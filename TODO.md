@@ -1,0 +1,5 @@
+- better error screens when stuff goes wrong
+- split API View out, and by default make a trivial way for servers (including serverside ones) to serve the APIView as a staticfolder at /docs
+  - probably build a standalone package that just needs one call or even a src attribute to pass in the url
+  - the static folder can be ~5 lines of html if it can reference cdn content
+- make an /admin page

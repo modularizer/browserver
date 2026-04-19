@@ -34,15 +34,6 @@ function idbSetHtml(key: string, value: string): Promise<void> {
   }));
 }
 
-function idbRemoveHtml(key: string): Promise<void> {
-  return openHtmlDb().then(db => new Promise((resolve, reject) => {
-    const tx = db.transaction(DB_STORE, 'readwrite');
-    const store = tx.objectStore(DB_STORE);
-    const req = store.delete(key);
-    req.onsuccess = () => resolve();
-    req.onerror = () => reject(req.error);
-  }));
-}
 // Normalize hash for comparison: strip quotes and trim whitespace
 function normalizeHash(hash: string | null | undefined): string | null {
   if (typeof hash !== 'string') return null;
@@ -260,11 +251,19 @@ function installTransportBridge(): void {
         }
       } catch (err) {
         const message = err instanceof Error ? (err.stack ?? err.message) : String(err)
+        const isOffline = isOfflineErrorMessage(message)
         const body = new TextEncoder().encode(`[site-viewer bridge] ${message}`).buffer
+        const headers: Record<string, string> = { 'content-type': 'text/plain; charset=utf-8' }
+        if (isOffline) {
+          headers['x-browserver-offline'] = 'true'
+          // Also show the indicator if any subresource fails
+          showFailedToLoadIndicator('using cached version');
+        }
+
         return {
           type: 'PLAT_RESPONSE', id: msg.id,
           status: 500, statusText: 'Internal Server Error',
-          headers: { 'content-type': 'text/plain; charset=utf-8' },
+          headers,
           body,
           error: err instanceof Error ? err.message : String(err),
         }
@@ -298,8 +297,106 @@ if (typeof window !== 'undefined') {
   (window as any).__siteViewerRenderId = 0;
 }
 
+let hasFailed = false;
+
+// Loading progress bar
+function showLoadingProgressBar(durationMs = 10000) {
+  const tryInsert = () => {
+    if (!document.body) {
+      setTimeout(tryInsert, 10);
+      return;
+    }
+    let bar = document.getElementById('site-viewer-progress-bar') as HTMLDivElement | null;
+    if (!bar) {
+      console.log(`[site-viewer] creating progress bar (duration: ${durationMs}ms)`);
+      bar = document.createElement('div');
+      bar.id = 'site-viewer-progress-bar';
+      bar.style.position = 'fixed';
+      bar.style.bottom = '0';
+      bar.style.left = '0';
+      bar.style.height = '4px';
+      bar.style.background = '#0078d4'; // Brighter blue
+      bar.style.width = '0%';
+      bar.style.zIndex = '2147483647'; // Max z-index
+      bar.style.transition = `width ${durationMs}ms cubic-bezier(0.1, 0, 0.4, 1)`;
+      bar.style.pointerEvents = 'none';
+      bar.style.boxShadow = '0 0 4px rgba(0,120,212,0.4)';
+      document.body.appendChild(bar);
+      // Trigger animation
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          if (bar) bar.style.width = '90%';
+        });
+      });
+    }
+  };
+  tryInsert();
+}
+
+function finishLoadingProgress() {
+  if (hasFailed) return;
+  const bar = document.getElementById('site-viewer-progress-bar') as HTMLDivElement | null;
+  if (bar) {
+    bar.style.transition = 'width 0.3s ease-out';
+    bar.style.width = '100%';
+    setTimeout(() => bar.remove(), 600);
+  }
+}
+
+function failLoadingProgress() {
+  hasFailed = true;
+  const bar = document.getElementById('site-viewer-progress-bar') as HTMLDivElement | null;
+  if (bar) {
+    bar.style.transition = 'width 0.5s ease-out, background-color 0.3s ease-in';
+    bar.style.background = '#e74c3c'; // Red
+    setTimeout(() => {
+      if (bar) {
+        bar.style.opacity = '0';
+        setTimeout(() => bar.remove(), 500);
+      }
+    }, 800);
+  }
+}
+
+function removeLoadingProgress() {
+  document.getElementById('site-viewer-progress-bar')?.remove();
+}
+
+// Floating failed to load indicator
+function showFailedToLoadIndicator(subtext: string) {
+  hasFailed = true;
+  failLoadingProgress();
+  let indicator = document.getElementById('site-viewer-failed-indicator') as HTMLDivElement | null;
+  if (!indicator) {
+    indicator = document.createElement('div');
+    indicator.id = 'site-viewer-failed-indicator';
+    indicator.style.position = 'fixed';
+    indicator.style.bottom = '24px';
+    indicator.style.right = '24px';
+    indicator.style.zIndex = '9999';
+    indicator.style.background = '#e74c3c'; // Red for failure
+    indicator.style.color = '#fff';
+    indicator.style.padding = '12px 20px';
+    indicator.style.borderRadius = '8px';
+    indicator.style.boxShadow = '0 4px 12px rgba(0,0,0,0.2)';
+    indicator.style.fontFamily = 'inherit';
+    indicator.style.fontSize = '14px';
+    indicator.style.pointerEvents = 'none';
+    indicator.innerHTML = `<div style="font-weight:bold;margin-bottom:2px">Failed To Load</div><div style="font-size:12px;opacity:0.9">${subtext}</div>`;
+    document.body.appendChild(indicator);
+  }
+}
+
+function isOfflineErrorMessage(message: string): boolean {
+  return message.toLowerCase().includes('no online host');
+}
+
 // Floating update indicator
 function showUpdateAvailableIndicator(onClick: () => void) {
+  // Remove indicators if they exist
+  document.getElementById('site-viewer-failed-indicator')?.remove();
+  removeLoadingProgress();
+
   let indicator = document.getElementById('site-viewer-update-indicator') as HTMLDivElement | null;
   if (!indicator) {
     indicator = document.createElement('div');
@@ -344,7 +441,9 @@ async function renderHtmlDocument(html: string): Promise<void> {
     document.open();
     document.write(html);
     document.close();
-    await ensureDocumentFavicon();
+    void ensureDocumentFavicon();
+    // Yield to let the document settle
+    await new Promise(resolve => setTimeout(resolve, 0));
     return;
   } else {
     // Not first render: do nothing (should never happen except via update indicator logic)
@@ -435,16 +534,19 @@ async function cacheHtmlGet(key: string): Promise<string | null> {
   }
 }
 
-async function cacheHtmlRemove(key: string): Promise<void> {
-  try { await idbRemoveHtml(key); } catch {}
-}
-
 async function main(): Promise<void> {
+  const startTime = Date.now();
+  const storedDuration = sessionStorage.getItem('siteViewerLastLoadDuration');
+  const duration = storedDuration ? parseInt(storedDuration, 10) : 10000;
+
   // Hard guard: if already rendered for this navigation, do nothing
   if ((window as any).__siteViewerHasRendered) {
     console.warn('[site-viewer] main(): already rendered for this navigation, skipping.');
     return;
   }
+
+  // 0. Start progress bar immediately (even before SW/Connection)
+  showLoadingProgressBar(duration);
 
   const target = parseTargetFromLocation()
   if (!target) {
@@ -460,63 +562,75 @@ async function main(): Promise<void> {
     window.history.replaceState(null, '', '/' + target.serverName + '/' + window.location.search + window.location.hash)
   }
 
-
-  // 1. Try to get cached (possibly stale) content from IndexedDB only
-  let didRender = false;
-  let lastHash = normalizeHash(sessionStorage.getItem('siteViewerLastAppliedHash'));
-  let cachedHtml = await cacheHtmlGet('siteViewerLastHtml');
-  // Use a global flag to ensure only one render per navigation
-  if (!(window as any).__siteViewerHasRendered) {
-    if (cachedHtml && lastHash) {
-      console.warn('[site-viewer] Rendering from cache (no bootstrap check)');
-      await renderHtmlDocument(cachedHtml);
-      (window as any).__siteViewerHasRendered = true;
-      didRender = true;
-    } else {
-      // Cache miss or missing hash: fetch and render
-      try {
-        console.warn('[site-viewer] Cache miss or missing hash, fetching from network (no bootstrap check)');
-        const response = await fetch(window.location.pathname + window.location.search, {
-          method: 'GET',
-          credentials: 'same-origin',
-          cache: 'default',
-        });
-        const responseHtml = await response.text();
-        const responseHash = normalizeHash(response.headers.get('etag') || responseHtml);
-        await renderHtmlDocument(responseHtml);
-        (window as any).__siteViewerHasRendered = true;
-        didRender = true;
-        await cacheHtmlSet('siteViewerLastHtml', responseHtml);
-        sessionStorage.setItem('siteViewerLastAppliedHash', responseHash ?? '');
-      } catch (err) {
-        console.warn('[site-viewer] main: initial fetch failed', err);
-      }
-    }
+  if ((window as any).__siteViewerHasRendered) {
+    console.warn('[site-viewer] main(): already rendered for this navigation, skipping initial logic.');
   } else {
-    console.warn('[site-viewer] Not rendering: already rendered for this navigation.');
-  }
+    // 1. Immediately try to render from cache if available
+    const cachedHtml = await cacheHtmlGet('siteViewerLastHtml');
+    if (cachedHtml) {
+      console.warn('[site-viewer] main: immediate cache render');
+      await renderHtmlDocument(cachedHtml);
+      // Re-add bar because document.write clears it
+      showLoadingProgressBar(duration);
+    }
 
-  // 2. If no cached HTML, fetch and render, and store in IndexedDB only
-  if (!didRender) {
     try {
+      console.warn('[site-viewer] main: fetching fresh content');
       const response = await fetch(window.location.pathname + window.location.search, {
         method: 'GET',
         credentials: 'same-origin',
         cache: 'default',
       });
+
       const responseHtml = await response.text();
-      const responseHash = normalizeHash(response.headers.get('etag') || responseHtml);
-      if (document.body && document.body.childNodes.length === 1 && (document.body.firstChild as HTMLElement)?.id === 'bootstrap') {
-        await renderHtmlDocument(responseHtml);
-        didRender = true;
+      const isOffline = response.headers.get('x-browserver-offline') === 'true' || isOfflineErrorMessage(responseHtml);
+
+      if (response.ok && !isOffline) {
+        const loadDuration = Date.now() - startTime;
+        sessionStorage.setItem('siteViewerLastLoadDuration', String(loadDuration));
+
+        // Don't finish immediately; wait for window 'load' event (subresources)
+        window.addEventListener('load', () => {
+          console.log('[site-viewer] window load: finishing progress');
+          finishLoadingProgress();
+        }, { once: true });
+
+        const responseHash = normalizeHash(response.headers.get('etag') || responseHtml);
+        const lastAppliedHash = normalizeHash(sessionStorage.getItem('siteViewerLastAppliedHash'));
+
+        if (lastAppliedHash !== responseHash) {
+          // If we haven't rendered yet (no cache), or hash changed, apply it
+          if (!(window as any).__siteViewerHasRendered || !lastAppliedHash) {
+            await renderHtmlDocument(responseHtml);
+          } else {
+            // We already rendered cache, and hash changed -> show update available
+            showUpdateAvailableIndicator(() => window.location.reload());
+          }
+        }
+        await cacheHtmlSet('siteViewerLastHtml', responseHtml);
+        sessionStorage.setItem('siteViewerLastAppliedHash', responseHash ?? '');
+      } else if (isOffline) {
+        console.warn('[site-viewer] main: host is offline');
+        if ((window as any).__siteViewerHasRendered) {
+          showFailedToLoadIndicator('using cached version');
+        } else {
+          await renderHtmlDocument(responseHtml); // Render bridge error as last resort
+        }
+      } else {
+        // Some other non-OK response
+        if ((window as any).__siteViewerHasRendered) {
+          showFailedToLoadIndicator('using cached version');
+        } else {
+          await renderHtmlDocument(responseHtml);
+        }
       }
-      await cacheHtmlSet('siteViewerLastHtml', responseHtml);
-      sessionStorage.setItem('siteViewerLastAppliedHash', responseHash ?? '');
-      // Clear any pending nextHtml/nextHash to prevent update indicator or reload loop
-      await cacheHtmlRemove('siteViewerNextHtml');
-      sessionStorage.removeItem('siteViewerNextHash');
     } catch (err) {
       console.warn('[site-viewer] main: initial fetch failed', err);
+      if ((window as any).__siteViewerHasRendered) {
+        showFailedToLoadIndicator('using cached version');
+      } else {
+        setStatus(err instanceof Error ? err.message : String(err), true);
+      }
     }
   }
 
@@ -528,20 +642,31 @@ async function main(): Promise<void> {
       cache: 'reload',
     });
     const freshHtml = await freshResponse.text();
-    const freshHash = normalizeHash(freshResponse.headers.get('etag') || freshHtml);
-    const lastHash2 = normalizeHash(sessionStorage.getItem('siteViewerLastAppliedHash'));
-    if (lastHash2 !== freshHash && freshHash) {
-      // Always update cache if content changed
-      await cacheHtmlSet('siteViewerLastHtml', freshHtml);
-      sessionStorage.setItem('siteViewerLastAppliedHash', freshHash);
-      showUpdateAvailableIndicator(() => {
-        window.location.reload();
-      });
-    } else {
-      // No update, do nothing
+    const isOffline = freshResponse.headers.get('x-browserver-offline') === 'true' || isOfflineErrorMessage(freshHtml);
+
+    if (isOffline) {
+      console.warn('[site-viewer] main: background check shows host is still offline');
+      showFailedToLoadIndicator('using cached version');
+    } else if (freshResponse.ok) {
+      const freshHash = normalizeHash(freshResponse.headers.get('etag') || freshHtml);
+      const lastHash = normalizeHash(sessionStorage.getItem('siteViewerLastAppliedHash'));
+
+      // If we are now online, remove failed indicator
+      document.getElementById('site-viewer-failed-indicator')?.remove();
+
+      if (lastHash !== freshHash && freshHash) {
+        // Content changed, update cache and show update indicator
+        await cacheHtmlSet('siteViewerLastHtml', freshHtml);
+        sessionStorage.setItem('siteViewerLastAppliedHash', freshHash);
+        showUpdateAvailableIndicator(() => {
+          window.location.reload();
+        });
+      }
     }
   } catch (err) {
     console.warn('[site-viewer] main: background fetch failed', err);
+    // If background fetch fails, host might have gone offline
+    showFailedToLoadIndicator('using cached version');
   }
 }
 

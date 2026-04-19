@@ -15,7 +15,8 @@
     "desktop": "npm run start --workspace=@browserver/desktop",
     "build": "npm run build --workspaces --if-present",
     "build:studio": "npm run build --workspace=@browserver/studio",
-    "build:single": "npm run build:single --workspace=@browserver/studio",
+    "build:viewer": "npm run build --workspace=@browserver/site-viewer",
+    "build:playgoround": "npm run build --workspace=@browserver/api-playground",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "clean": "npm run clean --workspaces --if-present && rm -rf node_modules"
   },
