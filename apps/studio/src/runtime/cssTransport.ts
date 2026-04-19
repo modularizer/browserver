@@ -175,7 +175,7 @@ async function dialAuthorityChannel(requestedName: string): Promise<AuthorityDia
  *   ← { type: 'presence_snapshot', servers: [{ server_name, online }] }
  *   ← { type: 'presence_update', server_name, online }
  */
-function watchAuthorityPresence(serverName: string): Promise<void> {
+export function watchAuthorityPresence(serverName: string): Promise<void> {
   return new Promise<void>((resolve) => {
     let settled = false
     let socket: WebSocket | null = null

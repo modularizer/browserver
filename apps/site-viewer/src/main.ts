@@ -55,6 +55,7 @@ function normalizeHash(hash: string | null | undefined): string | null {
 import {
   createBrowserverCssFetchConnection,
   type BrowserverCssFetchConnection,
+  watchAuthorityPresence,
 } from '../../studio/src/runtime/cssTransport'
 
 interface PlatRequestMessage {
@@ -359,12 +360,15 @@ function showLoadingProgressBar(durationMs = 10000) {
 
 function finishLoadingProgress() {
   if (hasFailed) return;
-  const bar = document.getElementById('site-viewer-progress-bar') as HTMLDivElement | null;
-  if (bar) {
-    bar.style.transition = 'width 0.3s ease-out';
-    bar.style.width = '100%';
+  const bar = document.getElementById('site-viewer-progress-bar');
+  if (!bar || bar.style.width === '100%') return; // Already finishing or gone
+  
+  bar.style.transition = 'width 0.3s ease-out, opacity 0.3s ease-out 0.3s';
+  bar.style.width = '100%';
+  setTimeout(() => {
+    bar.style.opacity = '0';
     setTimeout(() => bar.remove(), 600);
-  }
+  }, 300);
 }
 
 function failLoadingProgress() {
@@ -454,6 +458,7 @@ function renderOfflineLandingPage(serverName: string) {
     </style>
 </head>
 <body>
+    <div id="site-viewer-offline-landing-flag" style="display:none"></div>
     <div class="container">
         <div class="icon">🛰️</div>
         <h1>Site Unavailable</h1>
@@ -638,8 +643,15 @@ async function cacheHtmlGet(key: string): Promise<string | null> {
 }
 
 async function main(): Promise<void> {
+  const target = parseTargetFromLocation()
+  if (!target) {
+    setStatus('No site specified. Visit /<namespace>/<project>/ to view a site.')
+    return
+  }
+
   const startTime = Date.now();
-  const storedDuration = sessionStorage.getItem('siteViewerLastLoadDuration');
+  const serverKey = `sv:${target.serverName}`;
+  const storedDuration = sessionStorage.getItem(`${serverKey}:dur`);
   const duration = storedDuration ? parseInt(storedDuration, 10) : 10000;
 
   // Hard guard: if already rendered for this navigation, do nothing
@@ -650,12 +662,6 @@ async function main(): Promise<void> {
 
   // 0. Start progress bar immediately (even before SW/Connection)
   showLoadingProgressBar(duration);
-
-  const target = parseTargetFromLocation()
-  if (!target) {
-    setStatus('No site specified. Visit /<namespace>/<project>/ to view a site.')
-    return
-  }
 
   setStatus(`Connecting to css://${target.serverName}…`)
   installTransportBridge()
@@ -669,7 +675,7 @@ async function main(): Promise<void> {
     console.warn('[site-viewer] main(): already rendered for this navigation, skipping initial logic.');
   } else {
     // 1. Immediately try to render from cache if available
-    const cachedHtml = await cacheHtmlGet('siteViewerLastHtml');
+    const cachedHtml = await cacheHtmlGet(`${serverKey}:html`);
     if (cachedHtml) {
       console.warn('[site-viewer] main: immediate cache render');
       await renderHtmlDocument(cachedHtml);
@@ -690,16 +696,22 @@ async function main(): Promise<void> {
 
       if (response.ok && !isOffline) {
         const loadDuration = Date.now() - startTime;
-        sessionStorage.setItem('siteViewerLastLoadDuration', String(loadDuration));
+        sessionStorage.setItem(`${serverKey}:dur`, String(loadDuration));
 
         // Don't finish immediately; wait for window 'load' event (subresources)
-        window.addEventListener('load', () => {
-          console.log('[site-viewer] window load: finishing progress');
+        const finish = () => {
+          console.log('[site-viewer] finishing progress (readyState=' + document.readyState + ')');
           finishLoadingProgress();
-        }, { once: true });
+        };
+
+        if (document.readyState === 'complete') {
+          finish();
+        } else {
+          window.addEventListener('load', finish, { once: true });
+        }
 
         const responseHash = normalizeHash(response.headers.get('etag') || responseHtml);
-        const lastAppliedHash = normalizeHash(sessionStorage.getItem('siteViewerLastAppliedHash'));
+        const lastAppliedHash = normalizeHash(sessionStorage.getItem(`${serverKey}:hash`));
 
         if (lastAppliedHash !== responseHash) {
           // If we haven't rendered yet (no cache), or hash changed, apply it
@@ -710,8 +722,8 @@ async function main(): Promise<void> {
             showUpdateAvailableIndicator(() => window.location.reload());
           }
         }
-        await cacheHtmlSet('siteViewerLastHtml', responseHtml);
-        sessionStorage.setItem('siteViewerLastAppliedHash', responseHash ?? '');
+        await cacheHtmlSet(`${serverKey}:html`, responseHtml);
+        sessionStorage.setItem(`${serverKey}:hash`, responseHash ?? '');
       } else if (isOffline) {
         console.warn('[site-viewer] main: host is offline');
         if ((window as any).__siteViewerHasRendered) {
@@ -737,39 +749,54 @@ async function main(): Promise<void> {
     }
   }
 
-  // 3. In the background, fetch fresh content and only update storage/indicator if hash differs
-  try {
-    const freshResponse = await fetch(window.location.pathname + window.location.search, {
-      method: 'GET',
-      credentials: 'same-origin',
-      cache: 'reload',
-    });
-    const freshHtml = await freshResponse.text();
-    const isOffline = freshResponse.headers.get('x-browserver-offline') === 'true' || isOfflineErrorMessage(freshHtml);
+  // 3. In the background, listen for presence and sync content
+  backgroundMonitor(target.serverName);
+}
 
-    if (isOffline) {
-      console.warn('[site-viewer] main: background check shows host is still offline');
-      showFailedToLoadIndicator('using cached version');
-    } else if (freshResponse.ok) {
-      const freshHash = normalizeHash(freshResponse.headers.get('etag') || freshHtml);
-      const lastHash = normalizeHash(sessionStorage.getItem('siteViewerLastAppliedHash'));
+async function backgroundMonitor(serverName: string) {
+  while (true) {
+    try {
+      console.log(`[site-viewer] backgroundMonitor: waiting for ${serverName} to be online...`);
+      await watchAuthorityPresence(serverName);
+      console.log(`[site-viewer] backgroundMonitor: host ${serverName} is online!`);
 
-      // If we are now online, remove failed indicator
-      document.getElementById('site-viewer-failed-indicator')?.remove();
+      const freshResponse = await fetch(window.location.pathname + window.location.search, {
+        method: 'GET',
+        credentials: 'same-origin',
+        cache: 'reload',
+      });
+      const freshHtml = await freshResponse.text();
+      const isOffline = freshResponse.headers.get('x-browserver-offline') === 'true' || isOfflineErrorMessage(freshHtml);
 
-      if (lastHash !== freshHash && freshHash) {
-        // Content changed, update cache and show update indicator
-        await cacheHtmlSet('siteViewerLastHtml', freshHtml);
-        sessionStorage.setItem('siteViewerLastAppliedHash', freshHash);
-        showUpdateAvailableIndicator(() => {
-          window.location.reload();
-        });
+      if (!isOffline && freshResponse.ok) {
+        // If we were showing the failed indicator, remove it
+        document.getElementById('site-viewer-failed-indicator')?.remove();
+
+        const freshHash = normalizeHash(freshResponse.headers.get('etag') || freshHtml);
+        const serverKey = `sv:${serverName}`;
+        const lastAppliedHash = normalizeHash(sessionStorage.getItem(`${serverKey}:hash`));
+
+        if (lastAppliedHash !== freshHash) {
+          // If we are currently showing the offline landing page (no cache was rendered), or we have no hash yet, auto-render
+          const isShowingLandingPage = !!document.getElementById('site-viewer-offline-landing-flag'); // I'll add this flag to the landing page
+          if (!(window as any).__siteViewerHasRendered || isShowingLandingPage || !lastAppliedHash) {
+            console.log('[site-viewer] backgroundMonitor: auto-rendering live content');
+            await renderHtmlDocument(freshHtml);
+          } else {
+            // We already rendered something (cache), and now host is back with newer content -> show update prompt
+            console.log('[site-viewer] backgroundMonitor: showing update available prompt');
+            showUpdateAvailableIndicator(() => window.location.reload());
+          }
+        }
+        
+        await cacheHtmlSet(`${serverKey}:html`, freshHtml);
+        sessionStorage.setItem(`${serverKey}:hash`, freshHash ?? '');
       }
+    } catch (err) {
+      console.warn('[site-viewer] backgroundMonitor error', err);
     }
-  } catch (err) {
-    console.warn('[site-viewer] main: background fetch failed', err);
-    // If background fetch fails, host might have gone offline
-    showFailedToLoadIndicator('using cached version');
+    // Small delay before next presence watch to avoid spamming if the socket closes/opens rapidly
+    await new Promise(r => setTimeout(r, 5000));
   }
 }
 
