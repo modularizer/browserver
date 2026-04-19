@@ -64,7 +64,7 @@ function baseName(path: string): string {
   return parts[parts.length - 1] ?? path
 }
 
-const DEFAULT_SAMPLE_ID = 'dmz/ts-static-site'
+const DEFAULT_SAMPLE_ID = 'dmz/ts-react-wordle'
 
 function findFirstImportConflict(names: string[], existingNames: string[]): number {
   const seen = new Set(existingNames)

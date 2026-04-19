@@ -138,7 +138,7 @@ interface WorkspaceState {
 
 const saveTimers = new Map<string, number>()
 export const ACTIVE_WORKSPACE_KEY = 'browserver:active-workspace'
-const DEFAULT_SAMPLE_ID = 'dmz/ts-static-site'
+const DEFAULT_SAMPLE_ID = 'dmz/ts-react-wordle'
 let SAMPLES: Sample[] = []
 let DEFAULT_SAMPLE: Sample | undefined
 
@@ -715,22 +715,24 @@ function isAllowedEditorPath(path: string, files: WorkspaceFile[]): boolean {
 }
 
 function createDefaultEditorSession(files: WorkspaceFile[]): WorkspaceEditorSession {
-  const firstPath = files[0]?.path ?? ''
-  // Open the API console view in the secondary pane by default so the two-pane
-  // layout (server editor | API client) is restored even after clearing data.
+  // Find package.json path if present
+  const pkgFile = files.find(f => f.name === 'package.json')
+  const pkgPath = pkgFile?.path ?? files[0]?.path ?? ''
+  // Put package.json first in the tab order if present
+  const orderedFiles = pkgFile ? [pkgFile, ...files.filter(f => f !== pkgFile)] : files
   const apiViewPath = editorViewPath('api')
   const paneTabs = normalizePaneTabs({
-    primary: { tabs: files.map((file) => file.path), activePath: firstPath },
+    primary: { tabs: orderedFiles.map((file) => file.path), activePath: pkgPath },
     secondary: { tabs: [apiViewPath], activePath: apiViewPath },
     tertiary: { tabs: [], activePath: null },
-  }, firstPath)
+  }, pkgPath)
   return {
     folders: [],
     openFilePaths: deriveOpenFilePaths(paneTabs),
     paneTabs,
-    paneFiles: derivePaneAssignments(paneTabs, firstPath),
+    paneFiles: derivePaneAssignments(paneTabs, pkgPath),
     activeEditorPane: 'primary',
-    activeFilePath: firstPath,
+    activeFilePath: pkgPath,
     activeBottomPanel: 'logs',
     activeRightPanelTab: 'client',
     viewTitles: { [apiViewPath]: 'API Client' },
