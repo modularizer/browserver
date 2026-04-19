@@ -61,7 +61,10 @@
              var barHtml = '<div id="site-viewer-progress-bar"></div>';
              
              var finalHtml = cachedHtml
-               .replace(/<script\b([^>]*\bsrc\s*=)/gi, '<script async $1')
+               .replace(/<script\b([^>]*\bsrc\s*=[^>]*)/gi, function(match) {
+                 if (match.toLowerCase().indexOf('tailwindcss') !== -1) return match;
+                 return match.replace('<script', '<script async');
+               })
                .replace('</head>', '<style>' + barStyle + '</style></head>')
                .replace('<body>', '<body>' + barHtml);
              

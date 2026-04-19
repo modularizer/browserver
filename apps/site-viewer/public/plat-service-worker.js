@@ -319,13 +319,29 @@ async function cachedForwardViaBridge(event, target) {
 
 async function respondWithShell(request) {
   const cache = await caches.open(SHELL_CACHE)
+  
+  // Try network first (Network-First strategy)
+  try {
+    const fresh = await fetch(SHELL_URL, { 
+      credentials: 'same-origin',
+      cache: 'no-cache' // Force revalidation from server
+    })
+    if (fresh.ok) {
+      await cache.put(SHELL_URL, fresh.clone())
+      return fresh
+    }
+  } catch (err) {
+    console.warn('[site-viewer-sw] shell network fetch failed, falling back to cache', err)
+  }
+
   const cached = await cache.match(SHELL_URL)
   if (cached) return cached
-  // First activation racing with navigation — fall back to network and
-  // seed the cache for next time.
-  const fresh = await fetch(SHELL_URL, { credentials: 'same-origin' })
-  if (fresh.ok) { try { await cache.put(SHELL_URL, fresh.clone()) } catch {} }
-  return fresh
+  
+  // Final fallback (should only happen on first-ever load if network is down)
+  return new Response('Site viewer shell unavailable offline (no cache)', { 
+    status: 503, 
+    headers: { 'content-type': 'text/plain' } 
+  })
 }
 
 function resolveTargetFromRequest(request) {

@@ -373,14 +373,26 @@ function showLoadingProgressBar(durationMs = 10000) {
 function finishLoadingProgress() {
   if (hasFailed) return;
   const bar = document.getElementById('site-viewer-progress-bar');
-  if (!bar || bar.style.width === '100%') return; // Already finishing or gone
+  if (!bar) {
+    console.warn('[site-viewer] finishLoadingProgress: bar not found');
+    return;
+  }
+  if (bar.style.width === '100%') return; 
   
-  bar.style.transition = 'width 0.3s ease-out, opacity 0.3s ease-out 0.3s';
+  console.log('[site-viewer] finalizing progress bar (animating to 100%)');
+  bar.style.animation = 'none'; // Disable any keyframe animations from inline bootstrap
+  bar.style.transition = 'width 0.4s ease-out';
   bar.style.width = '100%';
+  
   setTimeout(() => {
+    console.log('[site-viewer] progress bar finished, fading out');
+    bar.style.transition = 'opacity 0.4s ease-out';
     bar.style.opacity = '0';
-    setTimeout(() => bar.remove(), 600);
-  }, 300);
+    setTimeout(() => {
+      console.log('[site-viewer] progress bar removed');
+      bar.remove();
+    }, 500);
+  }, 400); // Wait for the 100% width transition
 }
 
 function failLoadingProgress() {
@@ -564,7 +576,10 @@ async function renderHtmlDocument(html: string, options?: { duration?: number })
 
     // Sanitize scripts to be non-blocking for the initial cache-render
     // This prevents external scripts (like Tailwind CDN) from stalling document.write
-    finalHtml = finalHtml.replace(/<script\b([^>]*\bsrc\s*=)/gi, '<script async $1');
+    finalHtml = finalHtml.replace(/<script\b([^>]*\bsrc\s*=[^>]*)/gi, function(match) {
+      if (match.toLowerCase().indexOf('tailwindcss') !== -1) return match;
+      return match.replace('<script', '<script async');
+    });
 
     if (options?.duration) {
       const barStyle = `
@@ -580,7 +595,7 @@ async function renderHtmlDocument(html: string, options?: { duration?: number })
         }
       `;
       const barHtml = `<div id="site-viewer-progress-bar"></div>`;
-      finalHtml = html
+      finalHtml = finalHtml
         .replace('</head>', `<style>${barStyle}</style></head>`)
         .replace('<body>', `<body>${barHtml}`);
       
@@ -711,7 +726,7 @@ async function main(): Promise<void> {
   await ensureServiceWorkerControlling()
   const swReadyEnd = performance.now();
   setStatus(`Connecting to host: css://${target.serverName}…`)
-  void getConnection(target.serverName)
+  const connectionPromise = getConnection(target.serverName)
   const setupEnd = performance.now();
   console.log(`[site-viewer-perf] Target resolution: ${(targetResolved - bootStart).toFixed(2)}ms, Setup (Bridge+SW+Conn): ${(setupEnd - setupStart).toFixed(2)}ms (SW part: ${(swReadyEnd - swReadyStart).toFixed(2)}ms)`);
 
@@ -724,6 +739,25 @@ async function main(): Promise<void> {
     console.warn('[site-viewer] main(): already rendered for this navigation, skipping initial fetch/cache logic.');
     // Yield to let the document settle and then start monitoring
     await new Promise(resolve => setTimeout(resolve, 0));
+    
+    // Ensure progress bar finishes for pre-rendered state ONLY after connection is ready
+    const finish = async () => {
+      try {
+        await connectionPromise;
+        requestAnimationFrame(() => {
+          if (document.readyState === 'complete') {
+            finishLoadingProgress();
+          } else {
+            window.addEventListener('load', () => finishLoadingProgress(), { once: true });
+          }
+        });
+      } catch (e) {
+        console.error('[site-viewer] finish: connection failed', e);
+        failLoadingProgress();
+      }
+    };
+    void finish();
+
     backgroundMonitor(target.serverName);
     return;
   }
@@ -741,6 +775,24 @@ async function main(): Promise<void> {
     await renderHtmlDocument(cachedHtml, { duration });
     const renderEnd = performance.now();
     console.log(`[site-viewer-perf] Cache fetch: ${(cacheFetchEnd - cacheFetchStart).toFixed(2)}ms, Render (Total): ${(renderEnd - renderStart).toFixed(2)}ms`);
+    
+    // Finish progress bar after successful cache render AND connection is ready
+    const finish = async () => {
+      try {
+        await connectionPromise;
+        requestAnimationFrame(() => {
+          if (document.readyState === 'complete') {
+            finishLoadingProgress();
+          } else {
+            window.addEventListener('load', () => finishLoadingProgress(), { once: true });
+          }
+        });
+      } catch (e) {
+        console.error('[site-viewer] finish (cache): connection failed', e);
+        failLoadingProgress();
+      }
+    };
+    void finish();
   } else {
     console.log(`[site-viewer-perf] Cache fetch: ${(cacheFetchEnd - cacheFetchStart).toFixed(2)}ms (no cache or already rendered)`);
   }
@@ -768,10 +820,22 @@ async function main(): Promise<void> {
         const loadDuration = Date.now() - startTime;
         sessionStorage.setItem(`${serverKey}:dur`, String(loadDuration));
 
-        // Don't finish immediately; wait for window 'load' event (subresources)
-        const finish = () => {
-          console.log('[site-viewer] finishing progress (readyState=' + document.readyState + ')');
-          finishLoadingProgress();
+        // Don't finish immediately; wait for connection AND window 'load' event
+        const finish = async () => {
+          try {
+            await connectionPromise;
+            requestAnimationFrame(() => {
+              console.log('[site-viewer] finishing progress (readyState=' + document.readyState + ')');
+              if (document.readyState === 'complete') {
+                finishLoadingProgress();
+              } else {
+                window.addEventListener('load', () => finishLoadingProgress(), { once: true });
+              }
+            });
+          } catch (e) {
+            console.error('[site-viewer] finish (network): connection failed', e);
+            failLoadingProgress();
+          }
         };
 
         if (document.readyState === 'complete') {
