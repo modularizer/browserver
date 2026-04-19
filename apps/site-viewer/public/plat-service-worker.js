@@ -157,9 +157,25 @@ async function forwardViaBridge(event, target, headerOverrides) {
       headers: new Headers(response.headers || {}),
     })
   } catch (err) {
-    return new Response('[site-viewer-sw] ' + (err?.message ?? String(err)), {
+    const message = err?.message ?? String(err)
+    const accept = (event.request.headers.get('accept') || '').toLowerCase()
+    const dest = event.request.headers.get('sec-fetch-dest') || ''
+    
+    // If it's a programmatic fetch or JSON is requested, return JSON error
+    if (dest === 'empty' || accept.includes('application/json')) {
+      return new Response(JSON.stringify({
+        error: '[site-viewer-sw] ' + message,
+        message: message,
+        source: 'sw'
+      }), {
+        status: 502, statusText: 'Bad Gateway',
+        headers: { 'content-type': 'application/json; charset=utf-8' },
+      })
+    }
+
+    return new Response('[site-viewer-sw] ' + message, {
       status: 502, statusText: 'Bad Gateway',
-      headers: { 'content-type': 'text/plain' },
+      headers: { 'content-type': 'text/plain; charset=utf-8' },
     })
   }
 }

@@ -254,30 +254,18 @@ function installTransportBridge(): void {
         const message = err instanceof Error ? (err.stack ?? err.message) : String(err)
         const isOffline = isOfflineErrorMessage(message)
 
-        const accept = msg.headers?.['accept'] || ''
-        const dest = msg.headers?.['sec-fetch-dest'] || ''
-        
-        // Aggressively assume JSON if it's a fetch/XHR (dest='empty'), 
-        // if JSON is requested, or if we don't know what it is (no accept header).
-        const wantsJson = accept.includes('application/json') || 
-                         dest === 'empty' || 
-                         (!accept && !dest)
-
-        let body: ArrayBuffer
-        const headers: Record<string, string> = {}
-
-        if (wantsJson) {
-          headers['content-type'] = 'application/json; charset=utf-8'
-          body = new TextEncoder().encode(JSON.stringify({
-            error: `[site-viewer bridge] ${message}`,
-            message: message,
-            source: 'site-viewer-bridge',
-            isOffline
-          })).buffer
-        } else {
-          headers['content-type'] = 'text/plain; charset=utf-8'
-          body = new TextEncoder().encode(`[site-viewer bridge] ${message}`).buffer
+        // For the bridge (which only handles subresources), we always return JSON
+        // to prevent parsing errors in the client.
+        const headers: Record<string, string> = {
+          'content-type': 'application/json; charset=utf-8'
         }
+
+        const body = new TextEncoder().encode(JSON.stringify({
+          error: `[site-viewer bridge] ${message}`,
+          message: message,
+          source: 'site-viewer-bridge',
+          isOffline
+        })).buffer
 
         if (isOffline) {
           headers['x-browserver-offline'] = 'true'
