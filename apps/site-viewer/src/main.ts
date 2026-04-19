@@ -252,8 +252,32 @@ function installTransportBridge(): void {
       } catch (err) {
         const message = err instanceof Error ? (err.stack ?? err.message) : String(err)
         const isOffline = isOfflineErrorMessage(message)
-        const body = new TextEncoder().encode(`[site-viewer bridge] ${message}`).buffer
-        const headers: Record<string, string> = { 'content-type': 'text/plain; charset=utf-8' }
+
+        const accept = msg.headers?.['accept'] || ''
+        const dest = msg.headers?.['sec-fetch-dest'] || ''
+        
+        // Aggressively assume JSON if it's a fetch/XHR (dest='empty'), 
+        // if JSON is requested, or if we don't know what it is (no accept header).
+        const wantsJson = accept.includes('application/json') || 
+                         dest === 'empty' || 
+                         (!accept && !dest)
+
+        let body: ArrayBuffer
+        const headers: Record<string, string> = {}
+
+        if (wantsJson) {
+          headers['content-type'] = 'application/json; charset=utf-8'
+          body = new TextEncoder().encode(JSON.stringify({
+            error: `[site-viewer bridge] ${message}`,
+            message: message,
+            source: 'site-viewer-bridge',
+            isOffline
+          })).buffer
+        } else {
+          headers['content-type'] = 'text/plain; charset=utf-8'
+          body = new TextEncoder().encode(`[site-viewer bridge] ${message}`).buffer
+        }
+
         if (isOffline) {
           headers['x-browserver-offline'] = 'true'
           // Also show the indicator if any subresource fails
@@ -360,6 +384,85 @@ function failLoadingProgress() {
 
 function removeLoadingProgress() {
   document.getElementById('site-viewer-progress-bar')?.remove();
+}
+
+function renderOfflineLandingPage(serverName: string) {
+  return `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Site Unavailable - ${serverName}</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background: #0f172a;
+            color: #f8fafc;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            text-align: center;
+        }
+        .container {
+            max-width: 480px;
+            padding: 40px;
+        }
+        .icon {
+            font-size: 48px;
+            margin-bottom: 24px;
+            display: inline-block;
+            opacity: 0.9;
+        }
+        h1 {
+            font-size: 24px;
+            font-weight: 600;
+            margin: 0 0 12px 0;
+            letter-spacing: -0.02em;
+        }
+        p {
+            font-size: 16px;
+            line-height: 1.6;
+            color: #94a3b8;
+            margin: 0 0 32px 0;
+        }
+        .server-name {
+            background: #1e293b;
+            padding: 4px 10px;
+            border-radius: 6px;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+            font-size: 14px;
+            color: #38bdf8;
+        }
+        .button {
+            display: inline-block;
+            background: #38bdf8;
+            color: #0f172a;
+            padding: 12px 24px;
+            border-radius: 8px;
+            font-weight: 600;
+            text-decoration: none;
+            transition: transform 0.2s, background 0.2s;
+        }
+        .button:hover {
+            background: #7dd3fc;
+            transform: translateY(-1px);
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="icon">🛰️</div>
+        <h1>Site Unavailable</h1>
+        <p>The host for <span class="server-name">${serverName}</span> is currently offline, and no cached version is available.</p>
+        <a href="javascript:location.reload()" class="button">Try Again</a>
+    </div>
+</body>
+</html>
+  `;
 }
 
 // Floating failed to load indicator
@@ -614,14 +717,14 @@ async function main(): Promise<void> {
         if ((window as any).__siteViewerHasRendered) {
           showFailedToLoadIndicator('using cached version');
         } else {
-          await renderHtmlDocument(responseHtml); // Render bridge error as last resort
+          await renderHtmlDocument(renderOfflineLandingPage(target.serverName));
         }
       } else {
         // Some other non-OK response
         if ((window as any).__siteViewerHasRendered) {
           showFailedToLoadIndicator('using cached version');
         } else {
-          await renderHtmlDocument(responseHtml);
+          await renderHtmlDocument(renderOfflineLandingPage(target.serverName));
         }
       }
     } catch (err) {
