@@ -78,7 +78,7 @@ function normalizeHash(hash: string | null | undefined): string | null {
 import {
   createBrowserverCssFetchConnection,
   type BrowserverCssFetchConnection,
-  watchAuthorityPresence,
+  onAuthorityPresence,
 } from '../../studio/src/runtime/cssTransport'
 
 interface PlatRequestMessage {

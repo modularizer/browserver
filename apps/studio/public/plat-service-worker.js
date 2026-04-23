@@ -149,10 +149,10 @@ async function resolveClient(clientId) {
 
 self.addEventListener('fetch', (event) => {
   const req = event.request
-  console.log('[browserver-sw] fetch event', req.url, 'referrer=', req.referrer, 'mode=', req.mode, 'dest=', req.destination)
+  // console.log('[browserver-sw] fetch event', req.url, 'referrer=', req.referrer, 'mode=', req.mode, 'dest=', req.destination)
   const target = parseCssTarget(req)
   if (!target) {
-    console.log('[browserver-sw] NOT intercepting', req.url, '— parseCssTarget returned null')
+    // console.log('[browserver-sw] NOT intercepting', req.url, '— parseCssTarget returned null')
     return
   }
   console.log('[browserver-sw] intercepting', req.url, '→', target.serverName, target.path)
